@@ -43,7 +43,7 @@ export default function LivePreview({ initialUrl = '' }) {
           <iframe ref={iframeRef} src={full} title="Live preview" />
         ) : (
           <div className="empty" style={{ background: '#fff', color: '#888' }}>
-            Define uma URL para ver preview
+            Set a URL to see the preview
           </div>
         )}
       </div>

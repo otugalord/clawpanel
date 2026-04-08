@@ -123,12 +123,12 @@ export default function ClaudeChat() {
       await api.post(`/api/claude/session/${projectId}/clear`);
       setMessages([]);
       setInput('');
-      toast.success('Chat limpo');
+      toast.success('Chat cleared');
       return;
     }
     if (text === '/restart') {
       await api.post(`/api/claude/session/${projectId}/restart`);
-      setMessages((m) => [...m, { role: 'system', content: 'A reiniciar sessão Claude...' }]);
+      setMessages((m) => [...m, { role: 'system', content: 'Restarting Claude session...' }]);
       setInput('');
       return;
     }
@@ -156,10 +156,10 @@ export default function ClaudeChat() {
     <div className={'chat-wrap' + (showPreview ? '' : ' no-preview')}>
       {/* Sidebar with projects */}
       <div className="chat-sidebar">
-        <h3>Projectos</h3>
+        <h3>Projects</h3>
         {apps.length === 0 && (
           <div className="text-xs text-dim" style={{ padding: 10 }}>
-            Cria uma app primeiro em <strong>Apps</strong>.
+            Create an app first in <strong>Apps</strong>.
           </div>
         )}
         {apps.map((a) => (
@@ -181,7 +181,7 @@ export default function ClaudeChat() {
         <div className="chat-header">
           <div>
             <div className="chat-header-title">
-              {activeApp ? activeApp.name : 'Escolha um projecto'}
+              {activeApp ? activeApp.name : 'Select a project'}
             </div>
             <div className="chat-header-sub">
               {activeApp?.folder} {connected ? '' : '· ws offline'}
@@ -196,7 +196,7 @@ export default function ClaudeChat() {
               onClick={async () => {
                 if (!projectId) return;
                 await api.post(`/api/claude/session/${projectId}/restart`);
-                toast('Sessão Claude reiniciada');
+                toast('Claude session restarted');
               }}
               title="Restart"
             >
@@ -206,7 +206,7 @@ export default function ClaudeChat() {
               className="btn btn-sm btn-ghost"
               onClick={async () => {
                 if (!projectId) return;
-                if (!window.confirm('Limpar histórico de chat?')) return;
+                if (!window.confirm('Clear chat history?')) return;
                 await api.post(`/api/claude/session/${projectId}/clear`);
                 setMessages([]);
               }}
@@ -228,26 +228,26 @@ export default function ClaudeChat() {
             color: 'var(--text)',
           }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontWeight: 700, color: 'var(--red)' }}>
-              <AlertTriangle size={15} /> Claude Code CLI não está disponível
+              <AlertTriangle size={15} /> Claude Code CLI is not available
             </div>
             <div style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.6, marginBottom: 10 }}>
               {claudeStatus && !claudeStatus.installed ? (
                 <>
-                  O binário <code>claude</code> não foi encontrado. Corre no servidor:
+                  The <code>claude</code> binary was not found. Run on the server:
                   <code style={{ display: 'block', marginTop: 6, padding: 8, background: 'var(--bg2)', borderRadius: 6 }}>
                     npm install -g @anthropic-ai/claude-code
                   </code>
                 </>
               ) : (
                 <>
-                  O <code>claude</code> existe mas não está autenticado (ou falhou ao lançar). Abre
-                  o Terminal e corre <code>claude</code> para iniciares o fluxo OAuth no browser.
+                  <code>claude</code> exists but is not authenticated (or failed to launch). Open
+                  the Terminal and run <code>claude</code> to start the OAuth flow in your browser.
                 </>
               )}
             </div>
             <div className="flex gap-8">
               <button className="btn btn-sm" onClick={() => navigate('/terminal')}>
-                <TerminalSquare size={13} /> Abrir Terminal
+                <TerminalSquare size={13} /> Open Terminal
               </button>
               <button
                 className="btn btn-sm btn-secondary"
@@ -256,11 +256,11 @@ export default function ClaudeChat() {
                   if (d) setClaudeStatus(d);
                   if (d?.installed && d?.authenticated) {
                     setClaudeCliError(false);
-                    toast.success('Claude pronto');
+                    toast.success('Claude ready');
                   }
                 }}
               >
-                <RotateCw size={13} /> Re-verificar
+                <RotateCw size={13} /> Re-check
               </button>
             </div>
           </div>
@@ -270,7 +270,7 @@ export default function ClaudeChat() {
           {!projectId && (
             <div className="empty">
               <div className="emoji">🤖</div>
-              <div>Escolhe um projecto à esquerda para começar a falar com o Claude.</div>
+              <div>Pick a project on the left to start chatting with Claude.</div>
             </div>
           )}
           {messages.map((m, i) => {
@@ -304,7 +304,7 @@ export default function ClaudeChat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={projectId ? 'Escreve para o Claude...  (/clear /restart /preview)' : 'Escolhe um projecto primeiro'}
+            placeholder={projectId ? 'Message Claude...  (/clear /restart /preview)' : 'Pick a project first'}
             disabled={!projectId}
             rows={1}
           />

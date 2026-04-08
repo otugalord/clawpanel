@@ -27,9 +27,9 @@ export default function Sidebar({ user }) {
     { to: '/', label: 'Dashboard', icon: LayoutDashboard },
     { to: '/claude', label: 'Claude Code', icon: MessageSquareCode },
     { to: '/apps', label: 'Apps', icon: Boxes },
-    { to: '/domains', label: 'Domínios', icon: Globe },
+    { to: '/domains', label: 'Domains', icon: Globe },
     { to: '/terminal', label: 'Terminal', icon: TerminalSquare },
-    { to: '/settings', label: 'Definições', icon: Settings },
+    { to: '/settings', label: 'Settings', icon: Settings },
   ];
 
   const claudeDotColor =
@@ -40,10 +40,10 @@ export default function Sidebar({ user }) {
       : 'var(--red)';
   const claudeLabel =
     claudeStatus?.installed && claudeStatus?.authenticated
-      ? 'Claude autenticado'
+      ? 'Claude authenticated'
       : claudeStatus?.installed
-      ? 'Claude não autenticado'
-      : 'Claude não instalado';
+      ? 'Claude not authenticated'
+      : 'Claude not installed';
 
   return (
     <aside className="sidebar">
@@ -52,7 +52,7 @@ export default function Sidebar({ user }) {
         ClawPanel
       </div>
       <nav className="sidebar-nav">
-        <div className="sidebar-section">Gestão</div>
+        <div className="sidebar-section">Management</div>
         {items.map((it) => {
           const Ico = it.icon;
           return (
@@ -109,7 +109,7 @@ export default function Sidebar({ user }) {
             api.setToken(null);
             navigate('/login');
           }}
-          title="Sair"
+          title="Sign out"
         >
           <LogOut size={16} />
         </button>

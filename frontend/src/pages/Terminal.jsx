@@ -109,7 +109,7 @@ export default function TerminalPage() {
             </button>
           </div>
         ))}
-        <button className="btn btn-sm btn-ghost" onClick={newTab}><Plus size={13} /> Nova</button>
+        <button className="btn btn-sm btn-ghost" onClick={newTab}><Plus size={13} /> New</button>
       </div>
       <div className="term-body" ref={containerRef} />
     </div>

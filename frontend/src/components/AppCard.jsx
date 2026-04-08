@@ -62,7 +62,7 @@ export default function AppCard({ app, onAction, busy }) {
         <button className="btn btn-sm btn-ghost" onClick={() => navigate(`/claude?project=${app.id}`)} title="Claude">
           <MessageSquareCode size={13} />
         </button>
-        <button className="btn btn-sm btn-danger" onClick={() => onAction('delete', app)} title="Apagar">
+        <button className="btn btn-sm btn-danger" onClick={() => onAction('delete', app)} title="Delete">
           <Trash2 size={13} />
         </button>
       </div>

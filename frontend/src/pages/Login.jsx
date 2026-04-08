@@ -27,7 +27,7 @@ export default function Login({ onAuth }) {
       onAuth?.(d.user);
       navigate('/');
     } catch (e) {
-      setErr(e.message || 'Erro');
+      setErr(e.message || 'Error');
     } finally {
       setLoading(false);
     }
@@ -46,8 +46,8 @@ export default function Login({ onAuth }) {
         </h1>
         <p>
           {mode === 'setup'
-            ? 'Cria a tua conta de administrador para começar.'
-            : 'Entra para gerir o teu servidor.'}
+            ? 'Create your admin account to get started.'
+            : 'Sign in to manage your server.'}
         </p>
         <div className="field">
           <label className="label">Username</label>
@@ -72,7 +72,7 @@ export default function Login({ onAuth }) {
         </div>
         {err && <div className="auth-error">{err}</div>}
         <button className="btn btn-lg" type="submit" disabled={loading}>
-          {loading ? 'Aguarde...' : mode === 'setup' ? 'Criar conta' : 'Entrar'}
+          {loading ? 'Please wait...' : mode === 'setup' ? 'Create account' : 'Sign in'}
         </button>
       </form>
     </div>
