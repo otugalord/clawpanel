@@ -19,27 +19,28 @@ const router = express.Router();
  * If the user configured an API key in settings, that takes precedence and
  * is considered "authenticated" regardless of the OAuth session state.
  */
-function runClaudeAuthStatus() {
+function stripAnsi(s) {
+  return String(s || '')
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07]*\x07/g, '');
+}
+
+/** Attempt 1: claude auth status --json (preferred, structured) */
+function tryJsonStatus() {
   try {
     const env = { ...process.env };
-    // Ask claude about its OAuth session, ignoring any ANTHROPIC_API_KEY that
-    // might be in the parent env (otherwise the CLI may short-circuit).
     delete env.ANTHROPIC_API_KEY;
     const out = execSync('claude auth status --json', {
-      encoding: 'utf8',
-      timeout: 6000,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env,
+      encoding: 'utf8', timeout: 6000, stdio: ['ignore', 'pipe', 'pipe'], env,
     });
-    const trimmed = (out || '').trim();
-    if (!trimmed) return { ok: false, loggedIn: false };
-    // Some CLI versions prefix with ANSI or banner lines — extract the JSON block
+    const trimmed = stripAnsi(out).trim();
+    if (!trimmed) return null;
     const start = trimmed.indexOf('{');
     const end = trimmed.lastIndexOf('}');
-    if (start === -1 || end === -1) return { ok: false, loggedIn: false, raw: trimmed };
+    if (start === -1 || end === -1) return null;
     const json = JSON.parse(trimmed.slice(start, end + 1));
     return {
-      ok: true,
+      source: 'json',
       loggedIn: !!json.loggedIn,
       authMethod: json.authMethod || null,
       apiProvider: json.apiProvider || null,
@@ -47,11 +48,68 @@ function runClaudeAuthStatus() {
       orgName: json.orgName || null,
       subscriptionType: json.subscriptionType || null,
     };
-  } catch (e) {
-    // If the command is missing or exits non-zero, treat as not-logged-in
-    const stderr = (e.stderr && e.stderr.toString()) || e.message || '';
-    return { ok: false, loggedIn: false, error: stderr.slice(0, 300) };
+  } catch {
+    return null;
   }
+}
+
+/** Attempt 2: plain `claude auth status` — regex for "logged in" / email */
+function tryPlainTextStatus() {
+  try {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    const out = execSync('claude auth status', {
+      encoding: 'utf8', timeout: 6000, stdio: ['ignore', 'pipe', 'pipe'], env,
+    });
+    const clean = stripAnsi(out);
+    const low = clean.toLowerCase();
+    const emailMatch = clean.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+    const notLoggedIn = /not (?:logged in|authenticated)|no account|please (?:log ?in|sign ?in)/.test(low);
+    const loggedIn =
+      !notLoggedIn && (
+        /(logged in|authenticated|signed in)/.test(low) ||
+        !!emailMatch
+      );
+    return {
+      source: 'plain',
+      loggedIn,
+      email: emailMatch ? emailMatch[0] : null,
+      raw: clean.slice(0, 300),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Attempt 3: `claude --version` — last-resort reachability check */
+function tryVersionCheck() {
+  try {
+    const env = { ...process.env };
+    delete env.ANTHROPIC_API_KEY;
+    const out = execSync('claude --version', {
+      encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], env,
+    });
+    const clean = stripAnsi(out).toLowerCase();
+    if (!clean) return { source: 'version', loggedIn: false };
+    if (/not (?:logged in|authenticated)|unauthorized|auth error/.test(clean)) {
+      return { source: 'version', loggedIn: false };
+    }
+    // Version ran clean with no auth error → last-resort assume authenticated.
+    // This only gets consulted if the other two failed entirely.
+    return { source: 'version', loggedIn: true };
+  } catch {
+    return { source: 'version', loggedIn: false };
+  }
+}
+
+function runClaudeAuthStatus() {
+  const j = tryJsonStatus();
+  if (j) return { ok: true, ...j };
+  const p = tryPlainTextStatus();
+  if (p) return { ok: true, ...p };
+  const v = tryVersionCheck();
+  if (v) return { ok: v.loggedIn === true, ...v };
+  return { ok: false, loggedIn: false };
 }
 
 function checkClaudeStatus() {
@@ -258,4 +316,4 @@ router.put('/settings', (req, res) => {
   res.json({ ok: true });
 });
 
-module.exports = { router, getStats };
+module.exports = { router, getStats, checkClaudeStatus };

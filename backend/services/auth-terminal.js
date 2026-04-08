@@ -3,15 +3,23 @@
  * that the browser can attach to via WebSocket. Unlike the previous "parse
  * URL from backend" approach, the user sees the real terminal output and
  * can click the URL themselves. Session lifetime is capped at 5 minutes.
+ *
+ * Emits (via Node EventEmitter):
+ *   - 'auth_code_submitted' { sessionId } — fired 5 seconds after the last
+ *     user input arrived. Server listens for this and triggers a claude
+ *     auth status check, broadcasting the result to WS clients.
  */
 const pty = require('node-pty');
+const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
 
 const MAX_SESSION_MS = 5 * 60 * 1000; // 5 minutes
+const AUTH_DEBOUNCE_MS = 5 * 1000;    // fire check 5s after the last keystroke
 
-class AuthTerminalManager {
+class AuthTerminalManager extends EventEmitter {
   constructor() {
-    this.sessions = new Map(); // id -> { pty, listeners:Set, createdAt, timer }
+    super();
+    this.sessions = new Map(); // id -> { pty, listeners:Set, createdAt, timer, codeTimer }
   }
 
   create() {
@@ -44,6 +52,7 @@ class AuthTerminalManager {
       listeners: new Set(),
       createdAt: Date.now(),
       timer: null,
+      codeTimer: null, // debounced auth check trigger
       output: '', // small rolling buffer so late subscribers see what happened
     };
 
@@ -62,6 +71,10 @@ class AuthTerminalManager {
         try { l({ type: 'auth_terminal_exit', sessionId: id, exitCode }); } catch {}
       }
       if (session.timer) clearTimeout(session.timer);
+      if (session.codeTimer) clearTimeout(session.codeTimer);
+      // When the PTY exits, the user probably completed auth. Fire the event
+      // immediately so the server re-checks auth status right away.
+      try { this.emit('auth_code_submitted', { sessionId: id, reason: 'pty_exit' }); } catch {}
       this.sessions.delete(id);
     });
 
@@ -77,7 +90,19 @@ class AuthTerminalManager {
   write(id, data) {
     const s = this.sessions.get(id);
     if (!s) return false;
-    try { s.pty.write(data); return true; } catch { return false; }
+    try {
+      s.pty.write(data);
+      // Debounce: every keystroke resets the 5s window so the full code has
+      // time to be submitted before we check. A newline or carriage return
+      // is a strong "I just submitted something" signal → also triggers.
+      if (s.codeTimer) clearTimeout(s.codeTimer);
+      s.codeTimer = setTimeout(() => {
+        try { this.emit('auth_code_submitted', { sessionId: id, reason: 'debounce' }); } catch {}
+      }, AUTH_DEBOUNCE_MS);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   resize(id, cols, rows) {
@@ -107,6 +132,7 @@ class AuthTerminalManager {
     if (!s) return false;
     try { s.pty.kill(); } catch {}
     if (s.timer) clearTimeout(s.timer);
+    if (s.codeTimer) clearTimeout(s.codeTimer);
     this.sessions.delete(id);
     return true;
   }

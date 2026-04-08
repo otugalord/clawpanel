@@ -16,7 +16,7 @@ const appsRouter = require('./routes/apps');
 const domainsRouter = require('./routes/domains');
 const claudeRouter = require('./routes/claude');
 const terminalRouter = require('./routes/terminal');
-const { router: systemRouter, getStats } = require('./routes/system');
+const { router: systemRouter, getStats, checkClaudeStatus } = require('./routes/system');
 const claudeSvc = require('./services/claude-code');
 const { terminalManager } = require('./services/terminal-manager');
 const { authTerminal } = require('./services/auth-terminal');
@@ -92,6 +92,31 @@ function broadcast(obj) {
 }
 
 app.set('wsBroadcast', broadcast);
+
+// When the user types an auth code into the embedded auth terminal,
+// auth-terminal emits 'auth_code_submitted' ~5s later. We then run a fresh
+// claude auth status check and broadcast the result so every connected
+// Settings page can update immediately without waiting for the 3s poll.
+authTerminal.on('auth_code_submitted', async ({ sessionId, reason }) => {
+  try {
+    // Tiny delay so claude has time to persist its credentials file
+    await new Promise((r) => setTimeout(r, 1000));
+    const status = checkClaudeStatus();
+    const payload = {
+      type: 'claude_auth_result',
+      authenticated: !!status.authenticated,
+      authMethod: status.authMethod,
+      email: status.email,
+      subscriptionType: status.subscriptionType,
+      reason,
+      sessionId,
+    };
+    broadcast(payload);
+    console.log(`[auth] code_submitted(${reason}) → authenticated=${payload.authenticated}`);
+  } catch (e) {
+    console.error('[auth] status check after code failed:', e.message);
+  }
+});
 
 wss.on('connection', (ws, req) => {
   // Auth via ?token=...

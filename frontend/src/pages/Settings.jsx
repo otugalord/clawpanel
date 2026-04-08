@@ -124,9 +124,22 @@ export default function Settings() {
       toast.error(msg.error || 'Failed to start auth terminal');
       setAuthTermLoading(false);
       setAuthTermActive(false);
+    } else if (msg.type === 'claude_auth_result') {
+      // Server-triggered immediate check after user submitted a code.
+      // Refresh the local status card and, if authenticated, celebrate.
+      loadClaudeStatus();
+      if (msg.authenticated) {
+        if (pollRef.current) {
+          clearInterval(pollRef.current);
+          pollRef.current = null;
+        }
+        setLoginPolling(false);
+        toast.success('Claude connected ✓');
+        if (authTermActive) closeAuthTerminal();
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authTermSessionId]);
+  }, [authTermSessionId, authTermActive]);
 
   const { send: wsSend, connected: wsConnected } = useWebSocket(onWsMessage);
   useEffect(() => { wsSendRef.current = wsSend; }, [wsSend]);
