@@ -53,9 +53,11 @@ class AuthTerminalManager extends EventEmitter {
     //  - setup-token validates the code immediately and reports success/error
     let p;
     try {
+      // Wide PTY (200 cols) so the long OAuth URL prints on a single line.
+      // The WebLinksAddon in xterm.js can only detect URLs that aren't wrapped.
       p = pty.spawn('claude', ['setup-token'], {
         name: 'xterm-256color',
-        cols: 100,
+        cols: 200,
         rows: 30,
         cwd: process.env.HOME || '/root',
         env,

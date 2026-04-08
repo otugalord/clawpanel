@@ -42,6 +42,9 @@ export default function Settings() {
   const [authTermLoading, setAuthTermLoading] = useState(false);
   const [loginPolling, setLoginPolling] = useState(false);
   const [manualCode, setManualCode] = useState('');
+  // Parsed login URL extracted from claude setup-token output
+  const [oauthUrl, setOauthUrl] = useState('');
+  const oauthUrlBufferRef = useRef('');
   const pollRef = useRef(null);
   const authTermContainerRef = useRef(null);
   const xtermRef = useRef(null);
@@ -119,6 +122,26 @@ export default function Settings() {
       if (xtermRef.current) {
         xtermRef.current.write(msg.data);
       }
+      // Accumulate output, strip ANSI + line wraps, scan for the OAuth URL.
+      // claude setup-token wraps long URLs with `\r\n` even at 200 cols, so
+      // we collapse all whitespace before searching.
+      if (!oauthUrl) {
+        oauthUrlBufferRef.current += msg.data;
+        if (oauthUrlBufferRef.current.length > 8000) {
+          oauthUrlBufferRef.current = oauthUrlBufferRef.current.slice(-6000);
+        }
+        const cleaned = oauthUrlBufferRef.current
+          .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+          .replace(/\x1b\][^\x07]*\x07/g, '')
+          .replace(/\r/g, '')
+          .replace(/\s+/g, '');
+        const m = cleaned.match(/https:\/\/(?:claude\.ai|claude\.com|anthropic\.com|console\.anthropic\.com)\/[^\s"'<>`]+/i);
+        if (m) {
+          // Trim any trailing junk that isn't part of the URL
+          const url = m[0].replace(/[)\].,;'"`]+$/, '');
+          setOauthUrl(url);
+        }
+      }
     } else if (msg.type === 'auth_terminal_exit' && msg.sessionId === authTermSessionId) {
       // NOTE: the natural PTY exit after printing the URL does NOT emit this
       // message any more — the backend keeps the session alive in
@@ -161,8 +184,10 @@ export default function Settings() {
     if (!xtermRef.current) {
       const term = new Xterm({
         fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-        fontSize: 12,
+        fontSize: 11,
         cursorBlink: true,
+        cols: 200,
+        rows: 30,
         theme: {
           background: '#0a0b14',
           foreground: '#e5e5e5',
@@ -247,6 +272,9 @@ export default function Settings() {
       authMethod: claudeStatus?.authMethod || null,
       email: claudeStatus?.email || null,
     };
+    // Reset URL extraction state
+    setOauthUrl('');
+    oauthUrlBufferRef.current = '';
     setAuthTermActive(true);
     setAuthTermSessionId(null);
     // The effect above will create the session once the container mounts
@@ -281,6 +309,8 @@ export default function Settings() {
     setAuthTermSessionId(null);
     setAuthTermLoading(false);
     setLoginPolling(false);
+    setOauthUrl('');
+    oauthUrlBufferRef.current = '';
   };
 
   // ─── API Key ───────────────────────────────────────────────────
@@ -514,6 +544,70 @@ export default function Settings() {
                       }} />
                       Claude is starting the sign-in flow
                     </div>
+
+                    {/* OAuth URL — extracted from terminal output and shown clean */}
+                    {oauthUrl && (
+                      <div style={{
+                        marginBottom: 12,
+                        padding: 14,
+                        background: 'var(--bg)',
+                        border: '1px solid rgba(108,99,255,.35)',
+                        borderRadius: 10,
+                      }}>
+                        <div style={{
+                          fontSize: 11,
+                          fontWeight: 700,
+                          color: 'var(--text-dim)',
+                          textTransform: 'uppercase',
+                          letterSpacing: 1.2,
+                          marginBottom: 8,
+                        }}>
+                          👉 Click to open Anthropic login
+                        </div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <a
+                            href={oauthUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="btn"
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              justifyContent: 'space-between',
+                              textDecoration: 'none',
+                              fontFamily: 'Menlo, monospace',
+                              fontSize: 11,
+                              padding: '12px 14px',
+                              overflow: 'hidden',
+                            }}
+                            title={oauthUrl}
+                          >
+                            <span style={{
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              whiteSpace: 'nowrap',
+                              flex: 1,
+                              textAlign: 'left',
+                            }}>
+                              {oauthUrl}
+                            </span>
+                            <span style={{ marginLeft: 10, flexShrink: 0 }}>↗</span>
+                          </a>
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => {
+                              navigator.clipboard.writeText(oauthUrl).then(
+                                () => toast.success('URL copied'),
+                                () => toast.error('Copy failed'),
+                              );
+                            }}
+                            style={{ flexShrink: 0 }}
+                          >
+                            <Copy size={13} /> Copy
+                          </button>
+                        </div>
+                      </div>
+                    )}
 
                     {/* Embedded xterm.js — click to focus, paste with Ctrl/Cmd+V */}
                     <div
