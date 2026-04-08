@@ -117,9 +117,15 @@ export default function Settings() {
         xtermRef.current.write(msg.data);
       }
     } else if (msg.type === 'auth_terminal_exit' && msg.sessionId === authTermSessionId) {
-      if (xtermRef.current) {
-        xtermRef.current.write('\r\n\x1b[33m[session ended]\x1b[0m\r\n');
+      // NOTE: the natural PTY exit after printing the URL does NOT emit this
+      // message any more — the backend keeps the session alive in
+      // waiting_for_code state. We only get here when the user explicitly
+      // cancels or the 10 min waiting TTL expires.
+      if (msg.reason === 'timeout') {
+        toast.error('Auth session timed out — click Sign in again');
+        closeAuthTerminal();
       }
+      // For 'cancelled' we already disposed the xterm locally, nothing to do.
     } else if (msg.type === 'auth_terminal_error') {
       toast.error(msg.error || 'Failed to start auth terminal');
       setAuthTermLoading(false);
@@ -569,11 +575,9 @@ export default function Settings() {
                     }}>
                       <div className="spinner" />
                       <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
-                        {loginPolling
-                          ? 'Waiting for sign-in… checking every 3 seconds'
-                          : authTermLoading
+                        {authTermLoading
                           ? 'Starting claude auth login…'
-                          : 'Follow the instructions in the terminal above'}
+                          : 'Anthropic page opened. Paste the code below when ready.'}
                       </span>
                       <button className="btn btn-sm btn-ghost" onClick={closeAuthTerminal}>
                         Cancel

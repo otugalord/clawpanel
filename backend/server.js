@@ -99,8 +99,11 @@ app.set('wsBroadcast', broadcast);
 // Settings page can update immediately without waiting for the 3s poll.
 authTerminal.on('auth_code_submitted', async ({ sessionId, reason }) => {
   try {
-    // Tiny delay so claude has time to persist its credentials file
-    await new Promise((r) => setTimeout(r, 1000));
+    // PTY exits very quickly after printing the URL — the actual code will
+    // be pasted later. Give the auth-code submission flow a bit longer to
+    // settle before we check credentials on disk.
+    const delay = reason === 'pty_exit' ? 2000 : 1000;
+    await new Promise((r) => setTimeout(r, delay));
     const status = checkClaudeStatus();
     const payload = {
       type: 'claude_auth_result',

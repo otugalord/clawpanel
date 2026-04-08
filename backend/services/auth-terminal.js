@@ -1,20 +1,33 @@
 /**
  * Auth Terminal manager — spawns `claude auth login` as a PTY session
- * that the browser can attach to via WebSocket. Unlike the previous "parse
- * URL from backend" approach, the user sees the real terminal output and
- * can click the URL themselves. Session lifetime is capped at 5 minutes.
+ * that the browser can attach to via WebSocket.
+ *
+ * Lifecycle:
+ *   1. `create()` spawns `claude auth login` which prints the OAuth URL and
+ *      immediately exits (this is the claude CLI behaviour).
+ *   2. We keep the session in memory in the "waiting_for_code" state and
+ *      send a helpful message to the frontend. The embedded xterm stays
+ *      open; the user sees the URL and instructions.
+ *   3. The user clicks Authorize on Anthropic's page, gets a code, and
+ *      pastes it into the manual input field below the terminal (or into
+ *      the terminal itself). Each paste flows through `write()`.
+ *   4. `write()` still fires the debounced `auth_code_submitted` event even
+ *      if the PTY is no longer alive, so the server can re-check auth.
+ *   5. After 10 minutes in "waiting_for_code", we time out and emit a final
+ *      `auth_terminal_exit`.
  *
  * Emits (via Node EventEmitter):
- *   - 'auth_code_submitted' { sessionId } — fired 5 seconds after the last
- *     user input arrived. Server listens for this and triggers a claude
- *     auth status check, broadcasting the result to WS clients.
+ *   - 'auth_code_submitted' { sessionId, reason } — fired when we believe
+ *     the user just submitted a code or when the PTY exits. Server listens
+ *     for this and broadcasts the current claude auth status.
  */
 const pty = require('node-pty');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
 
-const MAX_SESSION_MS = 5 * 60 * 1000; // 5 minutes
-const AUTH_DEBOUNCE_MS = 5 * 1000;    // fire check 5s after the last keystroke
+const WAITING_TTL_MS = 10 * 60 * 1000; // 10 minutes in waiting_for_code
+const MAX_SPAWN_MS = 2 * 60 * 1000;    // kill a hung PTY after 2 min
+const AUTH_DEBOUNCE_MS = 5 * 1000;     // fire check 5s after the last keystroke
 
 class AuthTerminalManager extends EventEmitter {
   constructor() {
@@ -49,11 +62,13 @@ class AuthTerminalManager extends EventEmitter {
     const session = {
       id,
       pty: p,
+      state: 'active', // 'active' | 'waiting_for_code' | 'closed'
       listeners: new Set(),
       createdAt: Date.now(),
-      timer: null,
-      codeTimer: null, // debounced auth check trigger
-      output: '', // small rolling buffer so late subscribers see what happened
+      spawnTimer: null,  // kills a hung PTY after MAX_SPAWN_MS
+      waitTimer: null,   // final cleanup after WAITING_TTL_MS
+      codeTimer: null,   // debounced auth check trigger
+      output: '',        // rolling buffer so late subscribers see what happened
     };
 
     p.onData((data) => {
@@ -67,21 +82,46 @@ class AuthTerminalManager extends EventEmitter {
     });
 
     p.onExit(({ exitCode }) => {
-      for (const l of session.listeners) {
-        try { l({ type: 'auth_terminal_exit', sessionId: id, exitCode }); } catch {}
+      // The CLI has printed the URL and exited. Transition to waiting_for_code
+      // and KEEP the session alive so the embedded terminal UI stays open
+      // and the user can paste the auth code.
+      session.state = 'waiting_for_code';
+      session.pty = null;
+      session.exitCode = exitCode;
+
+      if (session.spawnTimer) {
+        clearTimeout(session.spawnTimer);
+        session.spawnTimer = null;
       }
-      if (session.timer) clearTimeout(session.timer);
-      if (session.codeTimer) clearTimeout(session.codeTimer);
-      // When the PTY exits, the user probably completed auth. Fire the event
-      // immediately so the server re-checks auth status right away.
+
+      // Helpful prompt appended to the terminal output
+      const helpMsg =
+        '\r\n\x1b[33m📋 Copy the code from the Anthropic page and paste it in the field below.\x1b[0m\r\n';
+      session.output += helpMsg;
+      for (const l of session.listeners) {
+        try { l({ type: 'auth_terminal_output', sessionId: id, data: helpMsg }); } catch {}
+      }
+
+      // Fire the auth check immediately — in case the CLI completed auth by
+      // itself (older versions) or the user already had a valid session.
       try { this.emit('auth_code_submitted', { sessionId: id, reason: 'pty_exit' }); } catch {}
-      this.sessions.delete(id);
+
+      // Schedule final cleanup after 10 minutes of waiting
+      session.waitTimer = setTimeout(() => {
+        if (!this.sessions.has(id)) return;
+        for (const l of session.listeners) {
+          try { l({ type: 'auth_terminal_exit', sessionId: id, reason: 'timeout' }); } catch {}
+        }
+        this.sessions.delete(id);
+      }, WAITING_TTL_MS);
     });
 
-    // Auto-kill after 5 minutes
-    session.timer = setTimeout(() => {
-      try { p.kill(); } catch {}
-    }, MAX_SESSION_MS);
+    // Kill the PTY if it hangs without producing output (2 min safety)
+    session.spawnTimer = setTimeout(() => {
+      if (session.pty) {
+        try { session.pty.kill(); } catch {}
+      }
+    }, MAX_SPAWN_MS);
 
     this.sessions.set(id, session);
     return { id, createdAt: session.createdAt };
@@ -90,24 +130,31 @@ class AuthTerminalManager extends EventEmitter {
   write(id, data) {
     const s = this.sessions.get(id);
     if (!s) return false;
-    try {
-      s.pty.write(data);
-      // Debounce: every keystroke resets the 5s window so the full code has
-      // time to be submitted before we check. A newline or carriage return
-      // is a strong "I just submitted something" signal → also triggers.
-      if (s.codeTimer) clearTimeout(s.codeTimer);
-      s.codeTimer = setTimeout(() => {
-        try { this.emit('auth_code_submitted', { sessionId: id, reason: 'debounce' }); } catch {}
-      }, AUTH_DEBOUNCE_MS);
-      return true;
-    } catch {
-      return false;
+
+    // If the PTY is still alive, forward keystrokes to it. After the PTY has
+    // exited (waiting_for_code state), we echo what the user types back to the
+    // terminal UI so they get visual feedback while pasting the code.
+    if (s.pty) {
+      try { s.pty.write(data); } catch {}
+    } else if (s.state === 'waiting_for_code') {
+      // Echo to the xterm so the user sees the code appearing
+      for (const l of s.listeners) {
+        try { l({ type: 'auth_terminal_output', sessionId: id, data }); } catch {}
+      }
     }
+
+    // Debounce: every keystroke resets the 5s window so the full code has
+    // time to be submitted before we check. Works regardless of PTY state.
+    if (s.codeTimer) clearTimeout(s.codeTimer);
+    s.codeTimer = setTimeout(() => {
+      try { this.emit('auth_code_submitted', { sessionId: id, reason: 'debounce' }); } catch {}
+    }, AUTH_DEBOUNCE_MS);
+    return true;
   }
 
   resize(id, cols, rows) {
     const s = this.sessions.get(id);
-    if (!s) return false;
+    if (!s || !s.pty) return false;
     try { s.pty.resize(cols, rows); return true; } catch { return false; }
   }
 
@@ -127,12 +174,19 @@ class AuthTerminalManager extends EventEmitter {
     if (s) s.listeners.delete(listener);
   }
 
-  kill(id) {
+  kill(id, reason = 'cancelled') {
     const s = this.sessions.get(id);
     if (!s) return false;
-    try { s.pty.kill(); } catch {}
-    if (s.timer) clearTimeout(s.timer);
+    if (s.pty) { try { s.pty.kill(); } catch {} }
+    if (s.spawnTimer) clearTimeout(s.spawnTimer);
+    if (s.waitTimer) clearTimeout(s.waitTimer);
     if (s.codeTimer) clearTimeout(s.codeTimer);
+    // Notify listeners explicitly — this is the only path that should emit
+    // auth_terminal_exit to the frontend (natural PTY exit is silent on the
+    // UI, we just transition to waiting_for_code).
+    for (const l of s.listeners) {
+      try { l({ type: 'auth_terminal_exit', sessionId: id, reason }); } catch {}
+    }
     this.sessions.delete(id);
     return true;
   }
