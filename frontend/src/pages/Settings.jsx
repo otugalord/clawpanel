@@ -67,9 +67,7 @@ export default function Settings() {
       const d = await api.post('/api/system/claude-login/start', {});
       if (d.ok && d.url) {
         setLoginUrl(d.url);
-        // Open in new tab
-        try { window.open(d.url, '_blank', 'noopener,noreferrer'); } catch {}
-        toast.success('Sign-in link opened');
+        toast.success('Sign-in link ready — click below');
         // Start polling for auth status
         setLoginPolling(true);
         pollRef.current = setInterval(async () => {
@@ -90,6 +88,20 @@ export default function Settings() {
     } finally {
       setLoginLoading(false);
     }
+  };
+
+  const openLoginUrl = () => {
+    if (!loginUrl) return;
+    // Explicit user click = not blocked by browser popup blocker
+    window.open(loginUrl, '_blank', 'noopener,noreferrer');
+  };
+
+  const copyLoginUrl = () => {
+    if (!loginUrl) return;
+    navigator.clipboard.writeText(loginUrl).then(
+      () => toast.success('URL copied to clipboard'),
+      () => toast.error('Failed to copy — select the text manually'),
+    );
   };
 
   const cancelOAuth = async () => {
@@ -304,55 +316,120 @@ export default function Settings() {
                 )}
                 {(loginUrl || loginPolling) && (
                   <div style={{
-                    background: 'var(--bg2)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 10,
-                    padding: 16,
+                    background: 'linear-gradient(135deg, rgba(108,99,255,.08), rgba(108,99,255,.02))',
+                    border: '1px solid rgba(108,99,255,.25)',
+                    borderRadius: 12,
+                    padding: 20,
                   }}>
-                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 10 }}>
-                      Waiting for sign-in…
+                    <div style={{
+                      fontSize: 11,
+                      fontWeight: 800,
+                      color: 'var(--accent)',
+                      textTransform: 'uppercase',
+                      letterSpacing: 1.5,
+                      marginBottom: 14,
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 8,
+                    }}>
+                      <span style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        background: 'var(--accent)',
+                        boxShadow: '0 0 0 4px rgba(108,99,255,.2)',
+                        animation: 'ts-blink 1.6s infinite',
+                      }} />
+                      Step 1: Open the Anthropic login page
                     </div>
+
                     {loginUrl && (
                       <>
-                        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 10 }}>
-                          A browser tab should have opened. If not, click the link:
-                        </div>
-                        <a
-                          href={loginUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                        {/* Big prominent button */}
+                        <button
+                          className="btn btn-lg"
+                          onClick={openLoginUrl}
                           style={{
-                            display: 'inline-flex',
-                            alignItems: 'center',
-                            gap: 6,
-                            padding: '8px 14px',
-                            background: 'var(--card2)',
-                            border: '1px solid var(--border)',
-                            borderRadius: 6,
-                            color: 'var(--accent)',
-                            textDecoration: 'none',
-                            fontSize: 12,
-                            fontFamily: 'monospace',
-                            maxWidth: '100%',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap',
+                            width: '100%',
+                            justifyContent: 'center',
+                            padding: '14px 20px',
+                            fontSize: 14,
+                            marginBottom: 14,
                           }}
                         >
-                          <ExternalLink size={12} />
-                          {loginUrl.slice(0, 60)}…
-                        </a>
+                          <ExternalLink size={16} /> Open Anthropic Login →
+                        </button>
+
+                        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
+                          Or copy the URL and open it in any browser:
+                        </div>
+
+                        {/* Copyable URL box */}
+                        <div style={{
+                          background: 'var(--bg)',
+                          border: '1px solid var(--border)',
+                          borderRadius: 8,
+                          padding: '10px 12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          marginBottom: 12,
+                        }}>
+                          <input
+                            type="text"
+                            value={loginUrl}
+                            readOnly
+                            onFocus={(e) => e.target.select()}
+                            onClick={(e) => e.target.select()}
+                            style={{
+                              flex: 1,
+                              minWidth: 0,
+                              background: 'transparent',
+                              border: 'none',
+                              color: 'var(--text)',
+                              fontSize: 11,
+                              fontFamily: 'Menlo, Monaco, monospace',
+                              outline: 'none',
+                            }}
+                          />
+                          <button
+                            className="btn btn-sm btn-ghost"
+                            onClick={copyLoginUrl}
+                            style={{ flexShrink: 0 }}
+                          >
+                            <Copy size={12} /> Copy
+                          </button>
+                        </div>
+
+                        <div style={{
+                          fontSize: 11,
+                          color: 'var(--text-muted)',
+                          padding: '8px 10px',
+                          background: 'var(--bg2)',
+                          borderRadius: 6,
+                          borderLeft: '2px solid var(--accent)',
+                          marginBottom: 14,
+                        }}>
+                          💡 <strong style={{ color: 'var(--text-dim)' }}>Step 2:</strong> Sign in to Anthropic in the new tab. When done, come back here — this page will auto-detect it.
+                        </div>
                       </>
                     )}
-                    <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 10 }}>
+
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 10,
+                      padding: '10px 0',
+                      borderTop: '1px solid var(--border)',
+                    }}>
                       <div className="spinner" />
-                      <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                        Polling every 3 seconds — complete the sign-in in your browser
+                      <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
+                        Waiting for sign-in… checking every 3 seconds
                       </span>
+                      <button className="btn btn-sm btn-ghost" onClick={cancelOAuth}>
+                        Cancel
+                      </button>
                     </div>
-                    <button className="btn btn-sm btn-ghost" style={{ marginTop: 12 }} onClick={cancelOAuth}>
-                      Cancel
-                    </button>
                   </div>
                 )}
               </div>
