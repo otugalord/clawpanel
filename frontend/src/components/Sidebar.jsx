@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -12,6 +13,15 @@ import { api } from '../lib/api';
 
 export default function Sidebar({ user }) {
   const navigate = useNavigate();
+  const [claudeStatus, setClaudeStatus] = useState(null);
+
+  useEffect(() => {
+    const load = () =>
+      api.get('/api/system/claude-status').then(setClaudeStatus).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, []);
 
   const items = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -21,6 +31,19 @@ export default function Sidebar({ user }) {
     { to: '/terminal', label: 'Terminal', icon: TerminalSquare },
     { to: '/settings', label: 'Definições', icon: Settings },
   ];
+
+  const claudeDotColor =
+    claudeStatus?.installed && claudeStatus?.authenticated
+      ? 'var(--green)'
+      : claudeStatus?.installed
+      ? 'var(--yellow)'
+      : 'var(--red)';
+  const claudeLabel =
+    claudeStatus?.installed && claudeStatus?.authenticated
+      ? 'Claude autenticado'
+      : claudeStatus?.installed
+      ? 'Claude não autenticado'
+      : 'Claude não instalado';
 
   return (
     <aside className="sidebar">
@@ -44,6 +67,37 @@ export default function Sidebar({ user }) {
           );
         })}
       </nav>
+      <div
+        onClick={() => navigate('/settings')}
+        title={claudeLabel}
+        style={{
+          padding: '10px 14px',
+          margin: '0 10px 6px',
+          background: 'var(--card2)',
+          border: '1px solid var(--border)',
+          borderRadius: 6,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          cursor: 'pointer',
+          fontSize: 11,
+          color: 'var(--text-dim)',
+        }}
+      >
+        <span
+          style={{
+            width: 8,
+            height: 8,
+            borderRadius: '50%',
+            background: claudeDotColor,
+            boxShadow: `0 0 6px ${claudeDotColor}`,
+            flexShrink: 0,
+          }}
+        />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {claudeLabel}
+        </span>
+      </div>
       <div className="sidebar-footer">
         <div className="avatar">{(user?.username || 'U').charAt(0).toUpperCase()}</div>
         <div>

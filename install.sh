@@ -61,6 +61,19 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 ok "pm2 $(pm2 -v)"
 
+# ─── Claude Code CLI ────────────────────────────────
+if ! command -v claude >/dev/null 2>&1; then
+  info "A instalar Claude Code CLI (@anthropic-ai/claude-code)…"
+  npm install -g @anthropic-ai/claude-code 2>&1 | tail -3 || {
+    warn "Falha a instalar claude CLI — podes instalar manualmente depois: npm i -g @anthropic-ai/claude-code"
+  }
+fi
+if command -v claude >/dev/null 2>&1; then
+  ok "claude $(claude --version 2>&1 | head -1)"
+else
+  warn "claude CLI não detectado no PATH"
+fi
+
 # ─── nginx ──────────────────────────────────────────
 if ! command -v nginx >/dev/null 2>&1; then
   info "A instalar nginx…"
@@ -139,11 +152,20 @@ pm2 startup systemd -u root --hp /root 2>&1 | grep -Eo 'sudo.*' | bash 2>/dev/nu
 
 ok "pm2 service '$SERVICE_NAME' a correr"
 
-# ─── nginx reverse proxy (port 80 → 3000) ──────────
+# ─── nginx reverse proxy (port 80 → $PORT) ─────────
 NGINX_CONF="/etc/nginx/sites-available/clawpanel.conf"
-if [[ ! -f "$NGINX_CONF" ]]; then
-  info "A criar config nginx (porta 80 → $PORT)…"
-  cat > "$NGINX_CONF" <<EOF
+
+# Check port 80 — is something else already listening?
+PORT80_HOLDER=""
+if command -v ss >/dev/null 2>&1; then
+  PORT80_HOLDER=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print $NF}' | head -1)
+fi
+if [[ -n "$PORT80_HOLDER" && "$PORT80_HOLDER" != *"nginx"* ]]; then
+  warn "porta 80 já está em uso por: $PORT80_HOLDER (nginx não irá servir em 80)"
+fi
+
+info "A (re)criar config nginx (porta 80 → $PORT)…"
+cat > "$NGINX_CONF" <<EOF
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
@@ -167,26 +189,33 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
     }
 }
 EOF
-  ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/clawpanel.conf
-  rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
-  if nginx -t >/dev/null 2>&1; then
-    systemctl reload nginx || systemctl restart nginx
-    ok "nginx configurado e recarregado"
+ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/clawpanel.conf
+# Remove default site only if it exists and we're taking port 80
+rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
+
+if nginx -t 2>&1 | grep -q "successful"; then
+  systemctl enable nginx >/dev/null 2>&1 || true
+  if systemctl is-active --quiet nginx; then
+    systemctl reload nginx && ok "nginx recarregado"
   else
-    warn "nginx -t falhou — config criada mas não aplicada"
+    systemctl start nginx && ok "nginx iniciado"
   fi
 else
-  ok "config nginx já existe"
+  warn "nginx -t falhou — ver: nginx -t"
+  nginx -t 2>&1 | head -5 | sed 's/^/    /'
 fi
 
 # ─── firewall (ufw) ─────────────────────────────────
 if command -v ufw >/dev/null 2>&1; then
-  ufw allow 80/tcp >/dev/null 2>&1 || true
-  ufw allow 443/tcp >/dev/null 2>&1 || true
-  ufw allow "$PORT"/tcp >/dev/null 2>&1 || true
+  if ufw status 2>/dev/null | grep -q "Status: active"; then
+    ufw allow 80/tcp >/dev/null 2>&1 && ok "ufw: porta 80/tcp permitida"
+    ufw allow 443/tcp >/dev/null 2>&1 || true
+    ufw allow "$PORT"/tcp >/dev/null 2>&1 && ok "ufw: porta $PORT/tcp permitida"
+  fi
 fi
 
 # ─── health check ───────────────────────────────────
@@ -210,5 +239,11 @@ echo "  $(bold 'Porta direta:') http://${IP}:${PORT}"
 echo "  $(bold 'Logs:')         pm2 logs clawpanel"
 echo "  $(bold 'Restart:')      pm2 restart clawpanel"
 echo
-echo "  Primeira visita → cria o utilizador administrador."
+echo "  $(bold '1.') Primeira visita → cria o utilizador administrador."
 echo
+echo "  $(bold '2.') $(yellow 'IMPORTANTE — Autenticar o Claude Code CLI:')"
+echo "     Corre $(bold 'claude') uma vez no terminal (ou no Terminal tab do ClawPanel)."
+echo "     Ele vai abrir um fluxo OAuth no browser para te autenticares."
+echo "     Sem isto, o chat Claude Code do ClawPanel não funciona."
+echo
+

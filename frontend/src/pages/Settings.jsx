@@ -1,14 +1,18 @@
 import { useEffect, useState } from 'react';
-import { Plus, Copy, Trash2 } from 'lucide-react';
+import { Plus, Copy, Trash2, RefreshCw, CheckCircle2, XCircle, TerminalSquare } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
 
 export default function Settings() {
+  const navigate = useNavigate();
   const [settings, setSettings] = useState({});
   const [keys, setKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
   const [revealedKey, setRevealedKey] = useState(null);
   const [passwords, setPasswords] = useState({ old: '', new: '', confirm: '' });
+  const [claudeStatus, setClaudeStatus] = useState(null);
+  const [claudeLoading, setClaudeLoading] = useState(false);
 
   const load = async () => {
     try {
@@ -16,13 +20,26 @@ export default function Settings() {
       setSettings(s.settings || {});
       setKeys(k.keys || []);
     } catch (e) { toast.error(e.message); }
+    loadClaudeStatus();
+  };
+
+  const loadClaudeStatus = async () => {
+    setClaudeLoading(true);
+    try {
+      const d = await api.get('/api/system/claude-status');
+      setClaudeStatus(d);
+    } catch (e) {
+      setClaudeStatus({ installed: false, authenticated: false, error: e.message });
+    } finally {
+      setClaudeLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, []);
 
   const saveSettings = async () => {
     try {
-      await api.put('/api/system/settings', settings);
+      await api.put('/api/system/settings', { apps_dir: settings.apps_dir });
       toast.success('Guardado');
       load();
     } catch (e) { toast.error(e.message); }
@@ -60,6 +77,18 @@ export default function Settings() {
     navigator.clipboard.writeText(txt).then(() => toast.success('Copiado'));
   };
 
+  const claudeBadge = () => {
+    if (claudeLoading) return <span className="badge badge-gray">a verificar…</span>;
+    if (!claudeStatus) return null;
+    if (claudeStatus.installed && claudeStatus.authenticated) {
+      return <span className="badge badge-green"><CheckCircle2 size={11} /> Autenticado</span>;
+    }
+    if (claudeStatus.installed && !claudeStatus.authenticated) {
+      return <span className="badge badge-yellow"><XCircle size={11} /> Não autenticado</span>;
+    }
+    return <span className="badge badge-red"><XCircle size={11} /> Não instalado</span>;
+  };
+
   return (
     <div>
       <div className="page-header">
@@ -70,48 +99,69 @@ export default function Settings() {
       </div>
 
       <div className="grid" style={{ gap: 18 }}>
-        {/* Integrations */}
+        {/* Claude Code Status */}
         <div className="card">
-          <div className="card-title">Integrações</div>
-          <div className="grid grid-2" style={{ gap: 12 }}>
-            <div>
-              <label className="label">Anthropic API Key</label>
-              <input
-                className="input"
-                type="password"
-                placeholder={settings.anthropic_api_key || 'sk-ant-...'}
-                onChange={(e) => setSettings({ ...settings, anthropic_api_key: e.target.value })}
-              />
-              <div className="text-xs text-dim" style={{ marginTop: 4 }}>Usado ao lançar sessões Claude Code</div>
+          <div className="card-title">
+            <span>Claude Code CLI</span>
+            {claudeBadge()}
+          </div>
+          {claudeStatus && (
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', display: 'grid', gap: 4, marginBottom: 14 }}>
+              <div>binário: <code>{claudeStatus.binary || '—'}</code></div>
+              <div>versão: <code>{claudeStatus.version || '—'}</code></div>
+              <div>config: <code>{claudeStatus.configDir || '—'}</code></div>
+              {claudeStatus.error && <div style={{ color: 'var(--red)' }}>erro: {claudeStatus.error}</div>}
             </div>
-            <div>
-              <label className="label">Namecheap API User</label>
-              <input
-                className="input"
-                placeholder={settings.namecheap_user || 'username'}
-                onChange={(e) => setSettings({ ...settings, namecheap_user: e.target.value })}
-              />
+          )}
+          {claudeStatus && !claudeStatus.installed && (
+            <div style={{
+              padding: 12, marginBottom: 12,
+              background: 'rgba(248,113,113,.08)', border: '1px solid rgba(248,113,113,.22)',
+              borderRadius: 8, fontSize: 12,
+            }}>
+              O <strong>Claude Code CLI</strong> não está instalado. No terminal do servidor, corre:
+              <code style={{ display: 'block', marginTop: 6, padding: 8, background: 'var(--bg2)', borderRadius: 6 }}>
+                npm install -g @anthropic-ai/claude-code
+              </code>
             </div>
-            <div>
-              <label className="label">Namecheap API Key</label>
-              <input
-                className="input"
-                type="password"
-                placeholder={settings.namecheap_api_key || ''}
-                onChange={(e) => setSettings({ ...settings, namecheap_api_key: e.target.value })}
-              />
+          )}
+          {claudeStatus && claudeStatus.installed && !claudeStatus.authenticated && (
+            <div style={{
+              padding: 12, marginBottom: 12,
+              background: 'rgba(251,191,36,.08)', border: '1px solid rgba(251,191,36,.22)',
+              borderRadius: 8, fontSize: 12,
+            }}>
+              O Claude está instalado mas <strong>ainda não autenticado</strong>. Abre o Terminal
+              do ClawPanel e corre <code>claude</code> — vai iniciar o fluxo OAuth no browser.
             </div>
+          )}
+          <div className="flex gap-8">
+            <button className="btn btn-secondary" onClick={loadClaudeStatus}>
+              <RefreshCw size={13} /> Re-verificar
+            </button>
+            {claudeStatus && !claudeStatus.authenticated && (
+              <button className="btn" onClick={() => navigate('/terminal')}>
+                <TerminalSquare size={13} /> Autenticar Claude (Terminal)
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Apps Directory */}
+        <div className="card">
+          <div className="card-title">Directório de Apps</div>
+          <div className="grid" style={{ gap: 12, maxWidth: 480 }}>
             <div>
               <label className="label">Apps Directory</label>
               <input
                 className="input"
                 value={settings.apps_dir || ''}
                 onChange={(e) => setSettings({ ...settings, apps_dir: e.target.value })}
+                placeholder="/root/apps"
               />
+              <div className="text-xs text-dim" style={{ marginTop: 4 }}>Onde novas apps são criadas por default</div>
             </div>
-          </div>
-          <div style={{ marginTop: 14 }}>
-            <button className="btn" onClick={saveSettings}>Guardar</button>
+            <div><button className="btn" onClick={saveSettings}>Guardar</button></div>
           </div>
         </div>
 
@@ -153,8 +203,10 @@ export default function Settings() {
                 ⚠ Copia esta chave agora — não será mostrada outra vez
               </div>
               {revealedKey}
-              <button className="btn btn-sm btn-ghost" style={{ marginLeft: 10 }} onClick={() => copy(revealedKey)}><Copy size={12} /></button>
-              <button className="btn btn-sm btn-ghost" onClick={() => setRevealedKey(null)}>fechar</button>
+              <div style={{ marginTop: 8 }}>
+                <button className="btn btn-sm btn-ghost" onClick={() => copy(revealedKey)}><Copy size={12} /> Copiar</button>
+                <button className="btn btn-sm btn-ghost" onClick={() => setRevealedKey(null)}>fechar</button>
+              </div>
             </div>
           )}
           <div className="flex gap-8" style={{ marginBottom: 14 }}>
@@ -191,7 +243,10 @@ export default function Settings() {
           <div className="card-title">Sobre</div>
           <div className="text-sm text-dim">
             ClawPanel v{settings.version || '0.1.0'} · self-hosted VPS management<br />
-            Stack: Node.js + Express + SQLite + React + node-pty
+            Stack: Node.js + Express + SQLite + React + node-pty<br />
+            <a href="https://github.com/otugalord/clawpanel" target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>
+              github.com/otugalord/clawpanel
+            </a>
           </div>
         </div>
       </div>

@@ -1,10 +1,62 @@
 const express = require('express');
 const si = require('systeminformation');
 const os = require('os');
+const fsLib = require('fs');
+const path = require('path');
+const { execSync } = require('child_process');
 const { db, getSetting, setSetting } = require('../db/database');
 const pm2svc = require('../services/pm2');
 
 const router = express.Router();
+
+// ─── Claude Code CLI status ───────────────────────────────────────────────
+function checkClaudeStatus() {
+  const result = {
+    installed: false,
+    authenticated: false,
+    version: null,
+    binary: null,
+    configDir: null,
+    error: null,
+  };
+  try {
+    // Is the binary on PATH?
+    const which = execSync('which claude', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    if (!which) throw new Error('claude not on PATH');
+    result.binary = which;
+    result.installed = true;
+
+    // Version
+    try {
+      result.version = execSync('claude --version', { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    } catch {}
+
+    // Check auth — ~/.claude dir with credentials/settings
+    const home = process.env.HOME || '/root';
+    const configDir = path.join(home, '.claude');
+    result.configDir = configDir;
+    if (fsLib.existsSync(configDir)) {
+      // Heuristics: any of these files indicate the user has auth state
+      const signals = [
+        '.credentials.json',
+        'credentials.json',
+        'settings.json',
+        'auth.json',
+        'oauth.json',
+      ];
+      const found = signals.some((f) => fsLib.existsSync(path.join(configDir, f)));
+      // Also accept any file inside the dir (setup has ran at least once)
+      let hasAny = false;
+      try {
+        hasAny = fsLib.readdirSync(configDir).length > 0;
+      } catch {}
+      result.authenticated = found || hasAny;
+    }
+  } catch (e) {
+    result.error = e.message;
+  }
+  return result;
+}
 
 async function getStats() {
   try {
@@ -38,6 +90,11 @@ async function getStats() {
 // GET /api/system/stats
 router.get('/stats', async (req, res) => {
   res.json(await getStats());
+});
+
+// GET /api/system/claude-status
+router.get('/claude-status', (req, res) => {
+  res.json(checkClaudeStatus());
 });
 
 // GET /api/system/dashboard

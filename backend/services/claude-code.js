@@ -4,7 +4,6 @@
  */
 const pty = require('node-pty');
 const fs = require('fs');
-const { getSetting } = require('../db/database');
 
 const sessions = new Map(); // projectId -> { pty, listeners:Set, cwd, createdAt }
 
@@ -14,9 +13,9 @@ function getSession(projectId) {
 
 function spawnSession(projectId, cwd) {
   if (!fs.existsSync(cwd)) fs.mkdirSync(cwd, { recursive: true });
+  // Claude Code CLI uses its own OAuth credentials in ~/.claude/ — we do NOT
+  // inject ANTHROPIC_API_KEY here; that would override the user's auth.
   const env = { ...process.env, TERM: 'xterm-256color' };
-  const anthropicKey = getSetting('anthropic_api_key');
-  if (anthropicKey) env.ANTHROPIC_API_KEY = anthropicKey;
 
   const claudePath = process.env.CLAUDE_BIN || 'claude';
   let p;

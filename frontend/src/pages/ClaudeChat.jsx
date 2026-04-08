@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { useSearchParams } from 'react-router-dom';
-import { Send, Eye, EyeOff, RotateCw, Trash2 } from 'lucide-react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
+import { Send, Eye, EyeOff, RotateCw, Trash2, TerminalSquare, AlertTriangle } from 'lucide-react';
 import { marked } from 'marked';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
@@ -26,6 +26,7 @@ function cleanPtyOutput(str) {
 
 export default function ClaudeChat() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const initialProject = searchParams.get('project');
 
   const [apps, setApps] = useState([]);
@@ -35,27 +36,56 @@ export default function ClaudeChat() {
   const [streaming, setStreaming] = useState(false);
   const [streamBuffer, setStreamBuffer] = useState('');
   const [showPreview, setShowPreview] = useState(false);
+  const [claudeCliError, setClaudeCliError] = useState(false);
+  const [claudeStatus, setClaudeStatus] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
+
+  // Detect CLI issues from stream content
+  const detectCliError = useCallback((text) => {
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return (
+      lower.includes('execvp') ||
+      lower.includes('no such file') ||
+      lower.includes('command not found') ||
+      lower.includes('enoent') ||
+      lower.includes('claude: not found')
+    );
+  }, []);
+
+  // Load Claude status on mount
+  useEffect(() => {
+    api.get('/api/system/claude-status').then((d) => {
+      setClaudeStatus(d);
+      if (!d.installed || !d.authenticated) setClaudeCliError(true);
+    }).catch(() => {});
+  }, []);
 
   const onWsMessage = useCallback((msg) => {
     if (msg.type === 'claude_output' && msg.projectId === projectId) {
       setStreaming(true);
-      setStreamBuffer((b) => (b + msg.data).slice(-50000));
+      setStreamBuffer((b) => {
+        const next = (b + msg.data).slice(-50000);
+        if (detectCliError(next)) setClaudeCliError(true);
+        return next;
+      });
+    } else if (msg.type === 'claude_exit' && msg.projectId === projectId) {
+      setStreaming(false);
+      setClaudeCliError(true);
+      return;
     } else if (msg.type === 'claude_done' && msg.projectId === projectId) {
       setStreaming(false);
       setStreamBuffer((buf) => {
         const clean = cleanPtyOutput(buf).trim();
         if (clean) {
+          if (detectCliError(clean)) setClaudeCliError(true);
           setMessages((m) => [...m, { role: 'assistant', content: clean, at: new Date().toISOString() }]);
         }
         return '';
       });
-    } else if (msg.type === 'claude_exit' && msg.projectId === projectId) {
-      setStreaming(false);
-      setMessages((m) => [...m, { role: 'system', content: 'Sessão Claude terminou.', at: new Date().toISOString() }]);
     }
-  }, [projectId]);
+  }, [projectId, detectCliError]);
 
   const { send, connected } = useWebSocket(onWsMessage);
 
@@ -186,6 +216,55 @@ export default function ClaudeChat() {
             </button>
           </div>
         </div>
+
+        {claudeCliError && (
+          <div style={{
+            margin: '14px 24px 0',
+            padding: '14px 16px',
+            background: 'rgba(248,113,113,.08)',
+            border: '1px solid rgba(248,113,113,.25)',
+            borderRadius: 10,
+            fontSize: 13,
+            color: 'var(--text)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontWeight: 700, color: 'var(--red)' }}>
+              <AlertTriangle size={15} /> Claude Code CLI não está disponível
+            </div>
+            <div style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.6, marginBottom: 10 }}>
+              {claudeStatus && !claudeStatus.installed ? (
+                <>
+                  O binário <code>claude</code> não foi encontrado. Corre no servidor:
+                  <code style={{ display: 'block', marginTop: 6, padding: 8, background: 'var(--bg2)', borderRadius: 6 }}>
+                    npm install -g @anthropic-ai/claude-code
+                  </code>
+                </>
+              ) : (
+                <>
+                  O <code>claude</code> existe mas não está autenticado (ou falhou ao lançar). Abre
+                  o Terminal e corre <code>claude</code> para iniciares o fluxo OAuth no browser.
+                </>
+              )}
+            </div>
+            <div className="flex gap-8">
+              <button className="btn btn-sm" onClick={() => navigate('/terminal')}>
+                <TerminalSquare size={13} /> Abrir Terminal
+              </button>
+              <button
+                className="btn btn-sm btn-secondary"
+                onClick={async () => {
+                  const d = await api.get('/api/system/claude-status').catch(() => null);
+                  if (d) setClaudeStatus(d);
+                  if (d?.installed && d?.authenticated) {
+                    setClaudeCliError(false);
+                    toast.success('Claude pronto');
+                  }
+                }}
+              >
+                <RotateCw size={13} /> Re-verificar
+              </button>
+            </div>
+          </div>
+        )}
 
         <div className="chat-messages" ref={scrollRef}>
           {!projectId && (
