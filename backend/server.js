@@ -7,7 +7,6 @@ const http = require('http');
 const fs = require('fs');
 const express = require('express');
 const cors = require('cors');
-const helmet = require('helmet');
 const { WebSocketServer } = require('ws');
 require('dotenv').config();
 
@@ -29,10 +28,26 @@ const FRONTEND_DIST = path.join(__dirname, '..', 'frontend', 'dist');
 const app = express();
 const server = http.createServer(app);
 
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-}));
+// ─── Security headers (HTTP-safe) ────────────────────────────────────────
+// We intentionally don't use helmet() because its defaults ship COOP/COEP
+// headers that break window.open() on plain HTTP origins (where ClawPanel
+// most often runs initially). We set only the headers that matter and are
+// safe over HTTP. Nginx/certbot can add HSTS later once HTTPS is set up.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.removeHeader('Cross-Origin-Embedder-Policy');
+  res.removeHeader('Cross-Origin-Resource-Policy');
+  // Only emit HSTS when the request actually came in over HTTPS
+  const proto = req.headers['x-forwarded-proto'] || req.protocol;
+  if (proto === 'https') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 

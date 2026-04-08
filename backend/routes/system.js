@@ -11,6 +11,49 @@ const claudeLogin = require('../services/claude-login');
 const router = express.Router();
 
 // ─── Claude Code CLI status ───────────────────────────────────────────────
+/**
+ * Real check: spawn `claude auth status --json` and parse the output.
+ * Folder-existence heuristics are unreliable — on a dev box ~/.claude can
+ * exist from previous use even when the current credentials are invalid.
+ *
+ * If the user configured an API key in settings, that takes precedence and
+ * is considered "authenticated" regardless of the OAuth session state.
+ */
+function runClaudeAuthStatus() {
+  try {
+    const env = { ...process.env };
+    // Ask claude about its OAuth session, ignoring any ANTHROPIC_API_KEY that
+    // might be in the parent env (otherwise the CLI may short-circuit).
+    delete env.ANTHROPIC_API_KEY;
+    const out = execSync('claude auth status --json', {
+      encoding: 'utf8',
+      timeout: 6000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+    const trimmed = (out || '').trim();
+    if (!trimmed) return { ok: false, loggedIn: false };
+    // Some CLI versions prefix with ANSI or banner lines — extract the JSON block
+    const start = trimmed.indexOf('{');
+    const end = trimmed.lastIndexOf('}');
+    if (start === -1 || end === -1) return { ok: false, loggedIn: false, raw: trimmed };
+    const json = JSON.parse(trimmed.slice(start, end + 1));
+    return {
+      ok: true,
+      loggedIn: !!json.loggedIn,
+      authMethod: json.authMethod || null,
+      apiProvider: json.apiProvider || null,
+      email: json.email || null,
+      orgName: json.orgName || null,
+      subscriptionType: json.subscriptionType || null,
+    };
+  } catch (e) {
+    // If the command is missing or exits non-zero, treat as not-logged-in
+    const stderr = (e.stderr && e.stderr.toString()) || e.message || '';
+    return { ok: false, loggedIn: false, error: stderr.slice(0, 300) };
+  }
+}
+
 function checkClaudeStatus() {
   const result = {
     installed: false,
@@ -19,6 +62,8 @@ function checkClaudeStatus() {
     version: null,
     binary: null,
     configDir: null,
+    email: null,
+    subscriptionType: null,
     error: null,
   };
   try {
@@ -33,38 +78,31 @@ function checkClaudeStatus() {
       result.version = execSync('claude --version', { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {}
 
-    // Check API key first (takes precedence for spawning)
+    // Config dir (informational only — NOT used to decide authentication)
+    const home = process.env.HOME || '/root';
+    result.configDir = path.join(home, '.claude');
+
+    // Precedence: API key in settings wins for spawning claude in chat mode
     const apiKey = getSetting('anthropic_api_key');
     if (apiKey && apiKey.trim()) {
       result.authenticated = true;
       result.authMethod = 'api_key';
     }
 
-    // Check OAuth — ~/.claude dir with credentials/settings
-    const home = process.env.HOME || '/root';
-    const configDir = path.join(home, '.claude');
-    result.configDir = configDir;
-    if (fsLib.existsSync(configDir)) {
-      const signals = [
-        '.credentials.json',
-        'credentials.json',
-        'settings.json',
-        'auth.json',
-        'oauth.json',
-      ];
-      const found = signals.some((f) => fsLib.existsSync(path.join(configDir, f)));
-      let hasAny = false;
-      try {
-        hasAny = fsLib.readdirSync(configDir).length > 0;
-      } catch {}
-      const oauthOk = found || hasAny;
-      if (oauthOk && !result.authenticated) {
+    // Real OAuth check via `claude auth status --json`
+    const authStatus = runClaudeAuthStatus();
+    if (authStatus.ok && authStatus.loggedIn) {
+      // Promote to authenticated if not already set by api_key
+      if (!result.authenticated) {
         result.authenticated = true;
         result.authMethod = 'oauth';
-      } else if (oauthOk && result.authMethod === 'api_key') {
-        // Both exist — api_key wins for spawning, but note oauth is also there
+      } else {
         result.oauthAlsoAvailable = true;
       }
+      result.email = authStatus.email;
+      result.subscriptionType = authStatus.subscriptionType;
+    } else if (!result.authenticated && authStatus.error) {
+      result.error = authStatus.error;
     }
   } catch (e) {
     result.error = e.message;
