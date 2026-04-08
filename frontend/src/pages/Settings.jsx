@@ -11,6 +11,18 @@ import toast from 'react-hot-toast';
 import { api } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
 
+const kbdStyle = {
+  display: 'inline-block',
+  padding: '1px 6px',
+  background: 'var(--card2, #171831)',
+  border: '1px solid var(--border)',
+  borderRadius: 4,
+  fontFamily: 'Menlo, monospace',
+  fontSize: 10,
+  color: 'var(--text)',
+  margin: '0 1px',
+};
+
 export default function Settings() {
   const [settings, setSettings] = useState({});
   const [keys, setKeys] = useState([]);
@@ -29,6 +41,7 @@ export default function Settings() {
   const [authTermSessionId, setAuthTermSessionId] = useState(null);
   const [authTermLoading, setAuthTermLoading] = useState(false);
   const [loginPolling, setLoginPolling] = useState(false);
+  const [manualCode, setManualCode] = useState('');
   const pollRef = useRef(null);
   const authTermContainerRef = useRef(null);
   const xtermRef = useRef(null);
@@ -135,6 +148,7 @@ export default function Settings() {
         },
         allowProposedApi: true,
         convertEol: true,
+        scrollback: 2000,
       });
       const fit = new FitAddon();
       term.loadAddon(fit);
@@ -144,6 +158,8 @@ export default function Settings() {
       }));
       term.open(authTermContainerRef.current);
       try { fit.fit(); } catch {}
+      // Auto-focus on mount so keystrokes / paste work immediately
+      setTimeout(() => { try { term.focus(); } catch {} }, 50);
       term.onData((data) => {
         if (authTermSessionId && wsSendRef.current) {
           wsSendRef.current({ type: 'auth_terminal_input', sessionId: authTermSessionId, data });
@@ -166,6 +182,32 @@ export default function Settings() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, [authTermActive, authTermSessionId]);
+
+  // Click anywhere on the terminal container → focus the xterm
+  const focusTerminal = () => {
+    if (xtermRef.current) {
+      try { xtermRef.current.focus(); } catch {}
+    }
+  };
+
+  // Manual code submit — sends the code + Enter to the PTY
+  const submitManualCode = () => {
+    const code = manualCode.trim();
+    if (!code) return;
+    if (!authTermSessionId || !wsSendRef.current) {
+      toast.error('Terminal session not ready');
+      return;
+    }
+    wsSendRef.current({
+      type: 'auth_terminal_input',
+      sessionId: authTermSessionId,
+      data: code + '\r',
+    });
+    setManualCode('');
+    toast.success('Code sent to terminal');
+    // Re-focus xterm so any follow-up prompts go there
+    setTimeout(focusTerminal, 100);
+  };
 
   const hasApiKeySaved =
     settings.anthropic_api_key && settings.anthropic_api_key.length > 0;
@@ -432,9 +474,11 @@ export default function Settings() {
                       Claude is starting the sign-in flow
                     </div>
 
-                    {/* Embedded xterm.js */}
+                    {/* Embedded xterm.js — click to focus, paste with Ctrl/Cmd+V */}
                     <div
                       ref={authTermContainerRef}
+                      onClick={focusTerminal}
+                      tabIndex={0}
                       style={{
                         background: '#0a0b14',
                         border: '1px solid var(--border)',
@@ -443,9 +487,11 @@ export default function Settings() {
                         height: 300,
                         marginBottom: 12,
                         overflow: 'hidden',
+                        cursor: 'text',
                       }}
                     />
 
+                    {/* Primary instruction */}
                     <div style={{
                       fontSize: 12,
                       color: 'var(--text-dim)',
@@ -454,11 +500,51 @@ export default function Settings() {
                       borderRadius: 6,
                       borderLeft: '2px solid var(--accent)',
                       marginBottom: 12,
-                      lineHeight: 1.6,
+                      lineHeight: 1.7,
                     }}>
-                      👉 <strong style={{ color: 'var(--text)' }}>Click the URL above</strong> to open the Anthropic login page in a new tab.
-                      Sign in, then come back — this page will auto-detect it.
-                      If a code is requested, type or paste it directly into the terminal above.
+                      👉 <strong style={{ color: 'var(--text)' }}>After clicking Authorize on Anthropic's page</strong>, copy the code and paste it into the terminal above.
+                      Click the terminal first to focus it, then use <kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd> (or <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>V</kbd>) to paste and press <kbd style={kbdStyle}>Enter</kbd>.
+                    </div>
+
+                    {/* Fallback: manual code input */}
+                    <div style={{
+                      padding: '12px 14px',
+                      background: 'var(--bg)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 8,
+                      marginBottom: 12,
+                    }}>
+                      <label className="label" style={{ marginBottom: 6 }}>
+                        Or paste the code here
+                      </label>
+                      <div style={{ display: 'flex', gap: 8 }}>
+                        <input
+                          className="input"
+                          type="text"
+                          placeholder="Paste authentication code"
+                          value={manualCode}
+                          onChange={(e) => setManualCode(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              submitManualCode();
+                            }
+                          }}
+                          style={{ flex: 1, fontFamily: 'Menlo, monospace', fontSize: 12 }}
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                        <button
+                          className="btn"
+                          onClick={submitManualCode}
+                          disabled={!manualCode.trim() || !authTermSessionId}
+                        >
+                          Submit
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
+                        Use this if pasting directly into the terminal doesn't work.
+                      </div>
                     </div>
 
                     <div style={{
