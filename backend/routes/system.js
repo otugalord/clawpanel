@@ -102,10 +102,51 @@ function tryVersionCheck() {
   }
 }
 
+/** Attempt 4: read ~/.claude/credentials.json directly */
+function tryCredentialsFile() {
+  try {
+    const home = process.env.HOME || '/root';
+    const candidates = [
+      path.join(home, '.claude', '.credentials.json'),
+      path.join(home, '.claude', 'credentials.json'),
+    ];
+    for (const file of candidates) {
+      if (!fsLib.existsSync(file)) continue;
+      let raw = '';
+      try { raw = fsLib.readFileSync(file, 'utf8'); } catch { continue; }
+      if (!raw.trim()) continue;
+      // Token files contain a JSON blob with an access_token / oauth token / sk-ant-oat
+      const hasToken =
+        /sk-ant-oat[A-Za-z0-9_-]+/.test(raw) ||
+        /"access_token"\s*:\s*"[^"]+"/.test(raw) ||
+        /"oauth(?:_token|Token)"\s*:\s*"[^"]+"/.test(raw) ||
+        /"token"\s*:\s*"sk-ant-/i.test(raw);
+      if (hasToken) {
+        let email = null;
+        const m = raw.match(/"email"\s*:\s*"([^"]+)"/);
+        if (m) email = m[1];
+        return {
+          source: 'credentials_file',
+          loggedIn: true,
+          authMethod: 'oauth',
+          email,
+          file,
+        };
+      }
+    }
+  } catch {}
+  return null;
+}
+
 function runClaudeAuthStatus() {
   const j = tryJsonStatus();
-  if (j) return { ok: true, ...j };
+  if (j && j.loggedIn) return { ok: true, ...j };
   const p = tryPlainTextStatus();
+  if (p && p.loggedIn) return { ok: true, ...p };
+  const f = tryCredentialsFile();
+  if (f) return { ok: true, ...f };
+  // Fall back to whatever the structured calls returned (even if loggedIn=false)
+  if (j) return { ok: true, ...j };
   if (p) return { ok: true, ...p };
   const v = tryVersionCheck();
   if (v) return { ok: v.loggedIn === true, ...v };

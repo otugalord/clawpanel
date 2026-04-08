@@ -1,27 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   Plus, Copy, Trash2, CheckCircle2, XCircle,
-  RefreshCw, Key, LogIn,
+  RefreshCw, Key, LogIn, ExternalLink,
 } from 'lucide-react';
-import { Terminal as Xterm } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import { WebLinksAddon } from '@xterm/addon-web-links';
-import '@xterm/xterm/css/xterm.css';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
 import { useWebSocket } from '../hooks/useWebSocket';
-
-const kbdStyle = {
-  display: 'inline-block',
-  padding: '1px 6px',
-  background: 'var(--card2, #171831)',
-  border: '1px solid var(--border)',
-  borderRadius: 4,
-  fontFamily: 'Menlo, monospace',
-  fontSize: 10,
-  color: 'var(--text)',
-  margin: '0 1px',
-};
 
 export default function Settings() {
   const [settings, setSettings] = useState({});
@@ -46,9 +30,6 @@ export default function Settings() {
   const [oauthUrl, setOauthUrl] = useState('');
   const oauthUrlBufferRef = useRef('');
   const pollRef = useRef(null);
-  const authTermContainerRef = useRef(null);
-  const xtermRef = useRef(null);
-  const fitRef = useRef(null);
   // Snapshot of the auth state when the user clicked Sign in. We only treat
   // a status check as "newly authenticated" if it differs from this baseline.
   // Prevents false positives on systems where the user was already signed in.
@@ -85,10 +66,6 @@ export default function Settings() {
       if (authTermSessionId) {
         try { wsSendRef.current?.({ type: 'auth_terminal_kill', sessionId: authTermSessionId }); } catch {}
       }
-      if (xtermRef.current) {
-        try { xtermRef.current.dispose(); } catch {}
-        xtermRef.current = null;
-      }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -119,9 +96,6 @@ export default function Settings() {
         }, 3000);
       }
     } else if (msg.type === 'auth_terminal_output' && msg.sessionId === authTermSessionId) {
-      if (xtermRef.current) {
-        xtermRef.current.write(msg.data);
-      }
       // Accumulate output, strip ANSI + line wraps, scan for the OAuth URL.
       // claude setup-token wraps long URLs with `\r\n` even at 200 cols, so
       // we collapse all whitespace before searching.
@@ -143,15 +117,14 @@ export default function Settings() {
         }
       }
     } else if (msg.type === 'auth_terminal_exit' && msg.sessionId === authTermSessionId) {
-      // NOTE: the natural PTY exit after printing the URL does NOT emit this
-      // message any more — the backend keeps the session alive in
-      // waiting_for_code state. We only get here when the user explicitly
-      // cancels or the 10 min waiting TTL expires.
+      // The natural PTY exit after printing the URL does NOT emit this
+      // message — the backend keeps the session alive in waiting_for_code
+      // state. We only get here when the user explicitly cancels or the
+      // 10 min waiting TTL expires.
       if (msg.reason === 'timeout') {
         toast.error('Auth session timed out — click Sign in again');
         closeAuthTerminal();
       }
-      // For 'cancelled' we already disposed the xterm locally, nothing to do.
     } else if (msg.type === 'auth_terminal_error') {
       toast.error(msg.error || 'Failed to start auth terminal');
       setAuthTermLoading(false);
@@ -177,73 +150,22 @@ export default function Settings() {
   const { send: wsSend, connected: wsConnected } = useWebSocket(onWsMessage);
   useEffect(() => { wsSendRef.current = wsSend; }, [wsSend]);
 
-  // Initialize xterm when the auth terminal becomes active
+  // Request a new auth-terminal session when the OAuth flow becomes active
   useEffect(() => {
-    if (!authTermActive || !authTermContainerRef.current) return;
-    // Create xterm once
-    if (!xtermRef.current) {
-      const term = new Xterm({
-        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
-        fontSize: 11,
-        cursorBlink: true,
-        cols: 200,
-        rows: 30,
-        theme: {
-          background: '#0a0b14',
-          foreground: '#e5e5e5',
-          cursor: '#6c63ff',
-          selectionBackground: '#6c63ff44',
-        },
-        allowProposedApi: true,
-        convertEol: true,
-        scrollback: 2000,
-      });
-      const fit = new FitAddon();
-      term.loadAddon(fit);
-      term.loadAddon(new WebLinksAddon((event, uri) => {
-        // Open URL in a new tab on click
-        window.open(uri, '_blank', 'noopener,noreferrer');
-      }));
-      term.open(authTermContainerRef.current);
-      try { fit.fit(); } catch {}
-      // Auto-focus on mount so keystrokes / paste work immediately
-      setTimeout(() => { try { term.focus(); } catch {} }, 50);
-      term.onData((data) => {
-        if (authTermSessionId && wsSendRef.current) {
-          wsSendRef.current({ type: 'auth_terminal_input', sessionId: authTermSessionId, data });
-        }
-      });
-      term.onResize(({ cols, rows }) => {
-        if (authTermSessionId && wsSendRef.current) {
-          wsSendRef.current({ type: 'auth_terminal_resize', sessionId: authTermSessionId, cols, rows });
-        }
-      });
-      xtermRef.current = term;
-      fitRef.current = fit;
-    }
-    // Request a new session if we don't have one yet
+    if (!authTermActive) return;
     if (!authTermSessionId && wsSendRef.current) {
       setAuthTermLoading(true);
       wsSendRef.current({ type: 'auth_terminal_create' });
     }
-    const onResize = () => { try { fitRef.current?.fit(); } catch {} };
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authTermActive, authTermSessionId]);
 
-  // Click anywhere on the terminal container → focus the xterm
-  const focusTerminal = () => {
-    if (xtermRef.current) {
-      try { xtermRef.current.focus(); } catch {}
-    }
-  };
-
-  // Manual code submit — sends the code + Enter to the PTY
+  // Manual code submit — sends the code + Enter via the WS to claude's stdin
   const submitManualCode = () => {
     const code = manualCode.trim();
     if (!code) return;
     if (!authTermSessionId || !wsSendRef.current) {
-      toast.error('Terminal session not ready');
+      toast.error('Sign-in session not ready');
       return;
     }
     wsSendRef.current({
@@ -252,9 +174,7 @@ export default function Settings() {
       data: code + '\r',
     });
     setManualCode('');
-    toast.success('Code sent to terminal');
-    // Re-focus xterm so any follow-up prompts go there
-    setTimeout(focusTerminal, 100);
+    toast.success('Code submitted');
   };
 
   const hasApiKeySaved =
@@ -295,11 +215,6 @@ export default function Settings() {
   const closeAuthTerminal = () => {
     if (authTermSessionId && wsSendRef.current) {
       try { wsSendRef.current({ type: 'auth_terminal_kill', sessionId: authTermSessionId }); } catch {}
-    }
-    if (xtermRef.current) {
-      try { xtermRef.current.dispose(); } catch {}
-      xtermRef.current = null;
-      fitRef.current = null;
     }
     if (pollRef.current) {
       clearInterval(pollRef.current);
@@ -518,187 +433,137 @@ export default function Settings() {
                 )}
                 {authTermActive && (
                   <div style={{
-                    background: 'linear-gradient(135deg, rgba(108,99,255,.08), rgba(108,99,255,.02))',
+                    background: 'linear-gradient(135deg, rgba(108,99,255,.06), rgba(108,99,255,.02))',
                     border: '1px solid rgba(108,99,255,.25)',
                     borderRadius: 12,
-                    padding: 18,
+                    padding: 22,
                   }}>
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 800,
-                      color: 'var(--accent)',
-                      textTransform: 'uppercase',
-                      letterSpacing: 1.5,
-                      marginBottom: 12,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 8,
-                    }}>
-                      <span style={{
-                        width: 8,
-                        height: 8,
-                        borderRadius: '50%',
-                        background: 'var(--accent)',
-                        boxShadow: '0 0 0 4px rgba(108,99,255,.2)',
-                        animation: 'ts-blink 1.6s infinite',
-                      }} />
-                      Claude is starting the sign-in flow
-                    </div>
-
-                    {/* OAuth URL — extracted from terminal output and shown clean */}
-                    {oauthUrl && (
+                    {/* Loading state — waiting for the URL to be extracted */}
+                    {!oauthUrl && (
                       <div style={{
-                        marginBottom: 12,
-                        padding: 14,
-                        background: 'var(--bg)',
-                        border: '1px solid rgba(108,99,255,.35)',
-                        borderRadius: 10,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 12,
+                        padding: '16px 4px',
                       }}>
-                        <div style={{
-                          fontSize: 11,
-                          fontWeight: 700,
-                          color: 'var(--text-dim)',
-                          textTransform: 'uppercase',
-                          letterSpacing: 1.2,
-                          marginBottom: 8,
-                        }}>
-                          👉 Click to open Anthropic login
-                        </div>
-                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                          <a
-                            href={oauthUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="btn"
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              justifyContent: 'space-between',
-                              textDecoration: 'none',
-                              fontFamily: 'Menlo, monospace',
-                              fontSize: 11,
-                              padding: '12px 14px',
-                              overflow: 'hidden',
-                            }}
-                            title={oauthUrl}
-                          >
-                            <span style={{
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              whiteSpace: 'nowrap',
-                              flex: 1,
-                              textAlign: 'left',
-                            }}>
-                              {oauthUrl}
-                            </span>
-                            <span style={{ marginLeft: 10, flexShrink: 0 }}>↗</span>
-                          </a>
-                          <button
-                            className="btn btn-secondary"
-                            onClick={() => {
-                              navigator.clipboard.writeText(oauthUrl).then(
-                                () => toast.success('URL copied'),
-                                () => toast.error('Copy failed'),
-                              );
-                            }}
-                            style={{ flexShrink: 0 }}
-                          >
-                            <Copy size={13} /> Copy
-                          </button>
-                        </div>
+                        <div className="spinner" />
+                        <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>
+                          Starting sign-in…
+                        </span>
                       </div>
                     )}
 
-                    {/* Embedded xterm.js — click to focus, paste with Ctrl/Cmd+V */}
-                    <div
-                      ref={authTermContainerRef}
-                      onClick={focusTerminal}
-                      tabIndex={0}
-                      style={{
-                        background: '#0a0b14',
-                        border: '1px solid var(--border)',
-                        borderRadius: 10,
-                        padding: 8,
-                        height: 300,
-                        marginBottom: 12,
-                        overflow: 'hidden',
-                        cursor: 'text',
-                      }}
-                    />
+                    {/* Step 1 + Step 2 — clean two-step UI, no terminal */}
+                    {oauthUrl && (
+                      <>
+                        <div style={{ marginBottom: 22 }}>
+                          <div style={{
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: 'var(--accent)',
+                            textTransform: 'uppercase',
+                            letterSpacing: 1.5,
+                            marginBottom: 10,
+                          }}>
+                            Step 1: Open the Anthropic login page
+                          </div>
+                          <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+                            <a
+                              href={oauthUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="btn"
+                              style={{
+                                flex: 1,
+                                justifyContent: 'center',
+                                textDecoration: 'none',
+                                padding: '14px 18px',
+                                fontSize: 14,
+                                fontWeight: 700,
+                              }}
+                              title={oauthUrl}
+                            >
+                              <ExternalLink size={16} /> Open Anthropic Login →
+                            </a>
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => {
+                                navigator.clipboard.writeText(oauthUrl).then(
+                                  () => toast.success('URL copied'),
+                                  () => toast.error('Copy failed'),
+                                );
+                              }}
+                              style={{ flexShrink: 0, padding: '0 18px' }}
+                              title={oauthUrl}
+                            >
+                              <Copy size={14} /> Copy URL
+                            </button>
+                          </div>
+                        </div>
 
-                    {/* Primary instruction */}
-                    <div style={{
-                      fontSize: 12,
-                      color: 'var(--text-dim)',
-                      padding: '10px 12px',
-                      background: 'var(--bg2)',
-                      borderRadius: 6,
-                      borderLeft: '2px solid var(--accent)',
-                      marginBottom: 12,
-                      lineHeight: 1.7,
-                    }}>
-                      👉 <strong style={{ color: 'var(--text)' }}>After clicking Authorize on Anthropic's page</strong>, copy the code and paste it into the terminal above.
-                      Click the terminal first to focus it, then use <kbd style={kbdStyle}>Ctrl</kbd>+<kbd style={kbdStyle}>V</kbd> (or <kbd style={kbdStyle}>⌘</kbd>+<kbd style={kbdStyle}>V</kbd>) to paste and press <kbd style={kbdStyle}>Enter</kbd>.
-                    </div>
+                        <div style={{ marginBottom: 22 }}>
+                          <div style={{
+                            fontSize: 11,
+                            fontWeight: 800,
+                            color: 'var(--accent)',
+                            textTransform: 'uppercase',
+                            letterSpacing: 1.5,
+                            marginBottom: 10,
+                          }}>
+                            Step 2: Authorize and paste the code below
+                          </div>
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            <input
+                              className="input"
+                              type="text"
+                              placeholder="Paste authentication code"
+                              value={manualCode}
+                              onChange={(e) => setManualCode(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  submitManualCode();
+                                }
+                              }}
+                              style={{
+                                flex: 1,
+                                fontFamily: 'Menlo, monospace',
+                                fontSize: 13,
+                                padding: '14px 16px',
+                              }}
+                              autoComplete="off"
+                              spellCheck={false}
+                              autoFocus
+                            />
+                            <button
+                              className="btn"
+                              onClick={submitManualCode}
+                              disabled={!manualCode.trim() || !authTermSessionId}
+                              style={{ padding: '0 22px' }}
+                            >
+                              Submit
+                            </button>
+                          </div>
+                        </div>
 
-                    {/* Fallback: manual code input */}
-                    <div style={{
-                      padding: '12px 14px',
-                      background: 'var(--bg)',
-                      border: '1px solid var(--border)',
-                      borderRadius: 8,
-                      marginBottom: 12,
-                    }}>
-                      <label className="label" style={{ marginBottom: 6 }}>
-                        Or paste the code here
-                      </label>
-                      <div style={{ display: 'flex', gap: 8 }}>
-                        <input
-                          className="input"
-                          type="text"
-                          placeholder="Paste authentication code"
-                          value={manualCode}
-                          onChange={(e) => setManualCode(e.target.value)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') {
-                              e.preventDefault();
-                              submitManualCode();
-                            }
-                          }}
-                          style={{ flex: 1, fontFamily: 'Menlo, monospace', fontSize: 12 }}
-                          autoComplete="off"
-                          spellCheck={false}
-                        />
-                        <button
-                          className="btn"
-                          onClick={submitManualCode}
-                          disabled={!manualCode.trim() || !authTermSessionId}
-                        >
-                          Submit
-                        </button>
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>
-                        Use this if pasting directly into the terminal doesn't work.
-                      </div>
-                    </div>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 10,
+                          padding: '12px 0 0',
+                          borderTop: '1px solid var(--border)',
+                        }}>
+                          <div className="spinner" />
+                          <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
+                            Waiting for authentication…
+                          </span>
+                          <button className="btn btn-sm btn-ghost" onClick={closeAuthTerminal}>
+                            Cancel
+                          </button>
+                        </div>
+                      </>
+                    )}
 
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 10,
-                      padding: '10px 0 0',
-                      borderTop: '1px solid var(--border)',
-                    }}>
-                      <div className="spinner" />
-                      <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
-                        {authTermLoading
-                          ? 'Starting claude auth login…'
-                          : 'Anthropic page opened. Paste the code below when ready.'}
-                      </span>
-                      <button className="btn btn-sm btn-ghost" onClick={closeAuthTerminal}>
-                        Cancel
-                      </button>
-                    </div>
                   </div>
                 )}
               </div>

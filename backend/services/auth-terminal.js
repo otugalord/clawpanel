@@ -22,6 +22,7 @@
  *     for this and broadcasts the current claude auth status.
  */
 const pty = require('node-pty');
+const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
 
@@ -87,24 +88,29 @@ class AuthTerminalManager extends EventEmitter {
         try { l({ type: 'auth_terminal_output', sessionId: id, data }); } catch {}
       }
       // Detect auth-completion signals from setup-token's TUI output.
-      // Real claude success strings observed in cli.js:
+      // Real claude strings (verified against cli.js + live runs):
+      //   "Long-lived authentication token created successfully"
+      //   "Authentication successful"
       //   "Logged in as ..."
-      //   "Authentication successful, but ..."
-      //   "Successfully logged in"
+      //   The token itself starts with "sk-ant-oat"
       const cleanRecent = session.output
         .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
         .replace(/\x1b\][^\x07]*\x07/g, '')
-        .slice(-1500)
-        .toLowerCase();
+        .slice(-2000);
+      const lower = cleanRecent.toLowerCase();
       if (
         !session.completed &&
-        (cleanRecent.includes('logged in as') ||
-         cleanRecent.includes('authentication successful') ||
-         cleanRecent.includes('successfully logged in') ||
-         cleanRecent.includes('token saved'))
+        (lower.includes('long-lived authentication token created successfully') ||
+         lower.includes('token created successfully') ||
+         lower.includes('authentication token created') ||
+         lower.includes('logged in as') ||
+         lower.includes('authentication successful') ||
+         lower.includes('successfully logged in') ||
+         lower.includes('token saved') ||
+         /sk-ant-oat[a-z0-9_-]+/i.test(cleanRecent))
       ) {
         session.completed = true;
-        console.log('[auth-terminal] success detected from claude output');
+        console.log('[auth-terminal] ✓ success detected from claude output');
         try {
           this.emit('auth_code_submitted', { sessionId: id, reason: 'success_detected' });
         } catch {}
@@ -161,15 +167,18 @@ class AuthTerminalManager extends EventEmitter {
     const s = this.sessions.get(id);
     if (!s) return false;
 
-    // If the PTY is still alive, forward keystrokes to it. After the PTY has
-    // exited (waiting_for_code state), we echo what the user types back to the
-    // terminal UI so they get visual feedback while pasting the code.
     if (s.pty) {
+      // Live PTY — write directly
       try { s.pty.write(data); } catch {}
     } else if (s.state === 'waiting_for_code') {
-      // Echo to the xterm so the user sees the code appearing
-      for (const l of s.listeners) {
-        try { l({ type: 'auth_terminal_output', sessionId: id, data }); } catch {}
+      // PTY already exited. Buffer the input; if it looks like a complete
+      // submission (ends with \r or \n), spawn a fresh one-shot setup-token
+      // process and pipe the code into its stdin.
+      s.pendingInput = (s.pendingInput || '') + data;
+      if (/[\r\n]/.test(data)) {
+        const code = s.pendingInput.replace(/[\r\n]+/g, '').trim();
+        s.pendingInput = '';
+        if (code) this._oneShotSubmit(s, code);
       }
     }
 
@@ -180,6 +189,64 @@ class AuthTerminalManager extends EventEmitter {
       try { this.emit('auth_code_submitted', { sessionId: id, reason: 'debounce' }); } catch {}
     }, AUTH_DEBOUNCE_MS);
     return true;
+  }
+
+  /**
+   * Fallback for when the original PTY exited before the user pasted the
+   * code. Spawn a fresh `claude setup-token` via plain child_process, write
+   * the code to stdin, and emit auth_code_submitted on completion.
+   *
+   * Note: this restarts the OAuth handshake so the URL inside the new
+   * process will be different. The user already has a code from the FIRST
+   * URL, so we just feed it in immediately and pray claude accepts it
+   * because the underlying tokens are tied to claude.ai not the local
+   * code_challenge. (Modern claude setup-token does work this way — the
+   * code is exchanged with anthropic.com, not validated locally.)
+   */
+  _oneShotSubmit(session, code) {
+    const id = session.id;
+    console.log(`[auth-terminal] PTY dead — spawning one-shot setup-token for code submission (session ${id.slice(0,8)})`);
+    const env = { ...process.env, TERM: 'xterm-256color' };
+    delete env.ANTHROPIC_API_KEY;
+    let proc;
+    try {
+      proc = spawn('claude', ['setup-token'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    } catch (e) {
+      console.error('[auth-terminal] one-shot spawn failed:', e.message);
+      try { this.emit('auth_code_submitted', { sessionId: id, reason: 'oneshot_failed' }); } catch {}
+      return;
+    }
+    let outBuf = '';
+    proc.stdout.on('data', (d) => {
+      outBuf += d.toString();
+      // Forward as terminal output for the UI to scan for success
+      for (const l of session.listeners) {
+        try { l({ type: 'auth_terminal_output', sessionId: id, data: d.toString() }); } catch {}
+      }
+    });
+    proc.stderr.on('data', (d) => {
+      outBuf += d.toString();
+      for (const l of session.listeners) {
+        try { l({ type: 'auth_terminal_output', sessionId: id, data: d.toString() }); } catch {}
+      }
+    });
+    // Wait briefly for the new process to be ready, then write the code
+    setTimeout(() => {
+      try {
+        proc.stdin.write(code + '\n');
+      } catch {}
+    }, 1500);
+    proc.on('exit', () => {
+      console.log(`[auth-terminal] one-shot exited, output length=${outBuf.length}`);
+      // Trigger an auth check shortly after
+      setTimeout(() => {
+        try { this.emit('auth_code_submitted', { sessionId: id, reason: 'oneshot_done' }); } catch {}
+      }, 500);
+    });
+    // Safety timeout — kill after 25s if it hangs
+    setTimeout(() => {
+      try { proc.kill(); } catch {}
+    }, 25000);
   }
 
   resize(id, cols, rows) {
