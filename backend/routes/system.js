@@ -6,6 +6,7 @@ const path = require('path');
 const { execSync } = require('child_process');
 const { db, getSetting, setSetting } = require('../db/database');
 const pm2svc = require('../services/pm2');
+const claudeLogin = require('../services/claude-login');
 
 const router = express.Router();
 
@@ -14,6 +15,7 @@ function checkClaudeStatus() {
   const result = {
     installed: false,
     authenticated: false,
+    authMethod: null, // 'api_key' | 'oauth' | null
     version: null,
     binary: null,
     configDir: null,
@@ -31,12 +33,18 @@ function checkClaudeStatus() {
       result.version = execSync('claude --version', { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
     } catch {}
 
-    // Check auth — ~/.claude dir with credentials/settings
+    // Check API key first (takes precedence for spawning)
+    const apiKey = getSetting('anthropic_api_key');
+    if (apiKey && apiKey.trim()) {
+      result.authenticated = true;
+      result.authMethod = 'api_key';
+    }
+
+    // Check OAuth — ~/.claude dir with credentials/settings
     const home = process.env.HOME || '/root';
     const configDir = path.join(home, '.claude');
     result.configDir = configDir;
     if (fsLib.existsSync(configDir)) {
-      // Heuristics: any of these files indicate the user has auth state
       const signals = [
         '.credentials.json',
         'credentials.json',
@@ -45,12 +53,18 @@ function checkClaudeStatus() {
         'oauth.json',
       ];
       const found = signals.some((f) => fsLib.existsSync(path.join(configDir, f)));
-      // Also accept any file inside the dir (setup has ran at least once)
       let hasAny = false;
       try {
         hasAny = fsLib.readdirSync(configDir).length > 0;
       } catch {}
-      result.authenticated = found || hasAny;
+      const oauthOk = found || hasAny;
+      if (oauthOk && !result.authenticated) {
+        result.authenticated = true;
+        result.authMethod = 'oauth';
+      } else if (oauthOk && result.authMethod === 'api_key') {
+        // Both exist — api_key wins for spawning, but note oauth is also there
+        result.oauthAlsoAvailable = true;
+      }
     }
   } catch (e) {
     result.error = e.message;
@@ -95,6 +109,52 @@ router.get('/stats', async (req, res) => {
 // GET /api/system/claude-status
 router.get('/claude-status', (req, res) => {
   res.json(checkClaudeStatus());
+});
+
+// ─── Claude OAuth login flow ────────────────────────────────────────────
+// POST /api/system/claude-login/start → spawns claude login PTY, returns URL
+router.post('/claude-login/start', async (req, res) => {
+  try {
+    const result = await claudeLogin.startLogin();
+    res.json(result);
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/system/claude-login/status → current login session state
+router.get('/claude-login/status', (req, res) => {
+  const loginStatus = claudeLogin.getStatus();
+  const claudeStatus = checkClaudeStatus();
+  res.json({ login: loginStatus, claude: claudeStatus });
+});
+
+// POST /api/system/claude-login/code → submit verification code if claude asks
+router.post('/claude-login/code', (req, res) => {
+  const { code } = req.body || {};
+  if (!code) return res.status(400).json({ error: 'code required' });
+  const ok = claudeLogin.sendCode(code);
+  res.json({ ok });
+});
+
+// POST /api/system/claude-login/cancel
+router.post('/claude-login/cancel', (req, res) => {
+  claudeLogin.cancel();
+  res.json({ ok: true });
+});
+
+// POST /api/system/claude-api-key → save / clear the Anthropic API key
+router.post('/claude-api-key', (req, res) => {
+  const { api_key } = req.body || {};
+  if (api_key === null || api_key === '') {
+    setSetting('anthropic_api_key', '');
+    return res.json({ ok: true, cleared: true });
+  }
+  if (typeof api_key !== 'string' || !api_key.startsWith('sk-ant-')) {
+    return res.status(400).json({ error: 'Invalid API key. Must start with sk-ant-' });
+  }
+  setSetting('anthropic_api_key', api_key.trim());
+  res.json({ ok: true });
 });
 
 // GET /api/system/dashboard

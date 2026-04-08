@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Send, Eye, EyeOff, RotateCw, Trash2, TerminalSquare, AlertTriangle } from 'lucide-react';
+import { Send, Eye, EyeOff, RotateCw, Trash2, Sparkles, Settings as SettingsIcon } from 'lucide-react';
 import { marked } from 'marked';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
@@ -217,63 +217,65 @@ export default function ClaudeChat() {
           </div>
         </div>
 
-        {claudeCliError && (
-          <div style={{
-            margin: '14px 24px 0',
-            padding: '14px 16px',
-            background: 'rgba(248,113,113,.08)',
-            border: '1px solid rgba(248,113,113,.25)',
-            borderRadius: 10,
-            fontSize: 13,
-            color: 'var(--text)',
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontWeight: 700, color: 'var(--red)' }}>
-              <AlertTriangle size={15} /> Claude Code CLI is not available
-            </div>
-            <div style={{ color: 'var(--text-dim)', fontSize: 12, lineHeight: 1.6, marginBottom: 10 }}>
-              {claudeStatus && !claudeStatus.installed ? (
-                <>
-                  The <code>claude</code> binary was not found. Run on the server:
-                  <code style={{ display: 'block', marginTop: 6, padding: 8, background: 'var(--bg2)', borderRadius: 6 }}>
-                    npm install -g @anthropic-ai/claude-code
-                  </code>
-                </>
-              ) : (
-                <>
-                  <code>claude</code> exists but is not authenticated (or failed to launch). Open
-                  the Terminal and run <code>claude</code> to start the OAuth flow in your browser.
-                </>
-              )}
-            </div>
-            <div className="flex gap-8">
-              <button className="btn btn-sm" onClick={() => navigate('/terminal')}>
-                <TerminalSquare size={13} /> Open Terminal
-              </button>
-              <button
-                className="btn btn-sm btn-secondary"
-                onClick={async () => {
-                  const d = await api.get('/api/system/claude-status').catch(() => null);
-                  if (d) setClaudeStatus(d);
-                  if (d?.installed && d?.authenticated) {
-                    setClaudeCliError(false);
-                    toast.success('Claude ready');
-                  }
-                }}
-              >
-                <RotateCw size={13} /> Re-check
-              </button>
-            </div>
-          </div>
-        )}
-
         <div className="chat-messages" ref={scrollRef}>
-          {!projectId && (
+          {claudeCliError && (
+            <div style={{
+              maxWidth: 460,
+              margin: '40px auto',
+              textAlign: 'center',
+              padding: '40px 32px',
+              background: 'var(--card)',
+              border: '1px solid var(--border)',
+              borderRadius: 14,
+            }}>
+              <div style={{
+                width: 64,
+                height: 64,
+                borderRadius: 16,
+                background: 'linear-gradient(135deg, var(--accent), var(--accent2, #8b5cf6))',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 18px',
+                boxShadow: '0 8px 28px rgba(108,99,255,.35)',
+              }}>
+                <Sparkles size={32} color="#fff" />
+              </div>
+              <h3 style={{ fontSize: 18, fontWeight: 800, color: 'var(--text)', marginBottom: 8 }}>
+                Connect Claude to get started
+              </h3>
+              <p style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.65, marginBottom: 24 }}>
+                {claudeStatus && !claudeStatus.installed
+                  ? 'The Claude Code CLI needs to be installed on your server. We can guide you through it.'
+                  : 'Sign in with your Anthropic account or add an API key to start building with Claude.'}
+              </p>
+              <button className="btn btn-lg" onClick={() => navigate('/settings')}>
+                <SettingsIcon size={15} /> Configure Claude →
+              </button>
+              <div style={{ marginTop: 14 }}>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={async () => {
+                    const d = await api.get('/api/system/claude-status').catch(() => null);
+                    if (d) setClaudeStatus(d);
+                    if (d?.installed && d?.authenticated) {
+                      setClaudeCliError(false);
+                      toast.success('Claude is ready');
+                    }
+                  }}
+                >
+                  <RotateCw size={12} /> Re-check
+                </button>
+              </div>
+            </div>
+          )}
+          {!projectId && !claudeCliError && (
             <div className="empty">
               <div className="emoji">🤖</div>
               <div>Pick a project on the left to start chatting with Claude.</div>
             </div>
           )}
-          {messages.map((m, i) => {
+          {!claudeCliError && messages.map((m, i) => {
             if (m.role === 'system') {
               return <div key={i} className="chat-msg system">{m.content}</div>;
             }
@@ -286,14 +288,14 @@ export default function ClaudeChat() {
               <div key={i} className="chat-msg user">{m.content}</div>
             );
           })}
-          {streaming && streamBuffer && (
+          {!claudeCliError && streaming && streamBuffer && (
             <div className="chat-msg assistant">
               <pre style={{ fontSize: 11, whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>
                 {cleanPtyOutput(streamBuffer).slice(-4000)}
               </pre>
             </div>
           )}
-          {streaming && (
+          {!claudeCliError && streaming && (
             <div className="chat-typing"><span></span><span></span><span></span></div>
           )}
         </div>
@@ -304,11 +306,17 @@ export default function ClaudeChat() {
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder={projectId ? 'Message Claude...  (/clear /restart /preview)' : 'Pick a project first'}
-            disabled={!projectId}
+            placeholder={
+              claudeCliError
+                ? 'Configure Claude in Settings first'
+                : projectId
+                ? 'Message Claude...  (/clear /restart /preview)'
+                : 'Pick a project first'
+            }
+            disabled={!projectId || claudeCliError}
             rows={1}
           />
-          <button className="send-btn" onClick={sendMessage} disabled={!input.trim() || !projectId}>
+          <button className="send-btn" onClick={sendMessage} disabled={!input.trim() || !projectId || claudeCliError}>
             <Send size={16} />
           </button>
         </div>

@@ -7,7 +7,6 @@ import Dashboard from './pages/Dashboard';
 import AppManager from './pages/AppManager';
 import ClaudeChat from './pages/ClaudeChat';
 import DomainManager from './pages/DomainManager';
-import TerminalPage from './pages/Terminal';
 import Settings from './pages/Settings';
 import { api } from './lib/api';
 
@@ -52,13 +51,12 @@ export default function App() {
       <Sidebar user={user} />
       <div className="main">
         <Topbar />
-        <div className="content" style={location.pathname === '/claude' || location.pathname === '/terminal' ? { padding: 0, overflow: 'hidden' } : {}}>
+        <div className="content" style={location.pathname === '/claude' ? { padding: 0, overflow: 'hidden' } : {}}>
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/apps" element={<AppManager />} />
             <Route path="/claude" element={<ClaudeChat />} />
             <Route path="/domains" element={<DomainManager />} />
-            <Route path="/terminal" element={<TerminalPage />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

@@ -5,7 +5,6 @@ import {
   MessageSquareCode,
   Boxes,
   Globe,
-  TerminalSquare,
   Settings,
   LogOut,
 } from 'lucide-react';
@@ -28,7 +27,6 @@ export default function Sidebar({ user }) {
     { to: '/claude', label: 'Claude Code', icon: MessageSquareCode },
     { to: '/apps', label: 'Apps', icon: Boxes },
     { to: '/domains', label: 'Domains', icon: Globe },
-    { to: '/terminal', label: 'Terminal', icon: TerminalSquare },
     { to: '/settings', label: 'Settings', icon: Settings },
   ];
 

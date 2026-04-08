@@ -4,6 +4,7 @@
  */
 const pty = require('node-pty');
 const fs = require('fs');
+const { getSetting } = require('../db/database');
 
 const sessions = new Map(); // projectId -> { pty, listeners:Set, cwd, createdAt }
 
@@ -11,11 +12,29 @@ function getSession(projectId) {
   return sessions.get(projectId) || null;
 }
 
+/**
+ * Auth precedence:
+ *   1. If anthropic_api_key is set in settings → inject ANTHROPIC_API_KEY env
+ *      (pay-per-use mode)
+ *   2. Otherwise → rely on claude's own OAuth credentials in ~/.claude/
+ *   3. If neither → pty still spawns, claude will prompt and user will see
+ *      the error via the friendly not-configured UI.
+ */
+function buildEnv() {
+  const env = { ...process.env, TERM: 'xterm-256color' };
+  const apiKey = getSetting('anthropic_api_key');
+  if (apiKey && apiKey.trim()) {
+    env.ANTHROPIC_API_KEY = apiKey.trim();
+  } else {
+    // Make sure no stale var from the parent process overrides the OAuth creds
+    delete env.ANTHROPIC_API_KEY;
+  }
+  return env;
+}
+
 function spawnSession(projectId, cwd) {
   if (!fs.existsSync(cwd)) fs.mkdirSync(cwd, { recursive: true });
-  // Claude Code CLI uses its own OAuth credentials in ~/.claude/ — we do NOT
-  // inject ANTHROPIC_API_KEY here; that would override the user's auth.
-  const env = { ...process.env, TERM: 'xterm-256color' };
+  const env = buildEnv();
 
   const claudePath = process.env.CLAUDE_BIN || 'claude';
   let p;
