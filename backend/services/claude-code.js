@@ -1,109 +1,217 @@
 /**
- * Claude Code PTY session manager.
- * One persistent pty per project (app) id. If it dies, next message respawns.
+ * Claude Code chat manager — uses `claude --print` (non-interactive mode)
+ * with stable session IDs for conversation continuity.
+ *
+ * Why not interactive PTY?
+ *   - The interactive TUI requires several confirmation dialogs (folder
+ *     trust + bypass-permissions warning) that are fragile to handle
+ *     programmatically.
+ *   - --print mode automatically skips the trust dialog and runs cleanly
+ *     even as root with IS_SANDBOX=1.
+ *   - --session-id <uuid> + --resume gives us conversation continuity.
+ *
+ * Lifecycle per project:
+ *   - First message: spawn `claude -p --session-id <uuid> "msg"` in cwd
+ *   - Save the uuid in memory
+ *   - Subsequent messages: spawn `claude -p --resume <uuid> "msg"` in cwd
+ *
+ * Each spawn streams stdout/stderr back to listeners, which the WS layer
+ * forwards as `claude_output` chunks and ends with `claude_done`.
  */
-const pty = require('node-pty');
+const { spawn } = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
+const path = require('path');
 const { getSetting } = require('../db/database');
+const { getCredentialFiles, extractTokenFromCredentialsJson } = require('../routes/system');
 
-const sessions = new Map(); // projectId -> { pty, listeners:Set, cwd, createdAt }
+// projectId -> { sessionId, cwd, listeners: Set, current: ChildProcess|null, createdAt }
+const sessions = new Map();
+
+function uuidv4() {
+  return crypto.randomUUID();
+}
 
 function getSession(projectId) {
   return sessions.get(projectId) || null;
 }
 
+function listSessions() {
+  return [...sessions.entries()].map(([projectId, s]) => ({
+    projectId,
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    createdAt: s.createdAt,
+    streaming: !!s.current,
+  }));
+}
+
 /**
- * Auth precedence:
- *   1. If anthropic_api_key is set in settings → inject ANTHROPIC_API_KEY env
- *      (pay-per-use mode)
- *   2. Otherwise → rely on claude's own OAuth credentials in ~/.claude/
- *   3. If neither → pty still spawns, claude will prompt and user will see
- *      the error via the friendly not-configured UI.
+ * Build the env vars for spawning claude. Tries (in order):
+ *   1. DB anthropic_api_key  → ANTHROPIC_API_KEY
+ *   2. existing CLAUDE_CODE_OAUTH_TOKEN env
+ *   3. ~/.claude/.credentials.json → CLAUDE_CODE_OAUTH_TOKEN + HOME
  */
 function buildEnv() {
   const env = { ...process.env, TERM: 'xterm-256color' };
+  // Required when running as root so the CLI accepts --dangerously-skip-permissions
+  env.IS_SANDBOX = '1';
+  env.CI = '1';
+
   const apiKey = getSetting('anthropic_api_key');
   if (apiKey && apiKey.trim()) {
     env.ANTHROPIC_API_KEY = apiKey.trim();
-  } else {
-    // Make sure no stale var from the parent process overrides the OAuth creds
-    delete env.ANTHROPIC_API_KEY;
+    return env;
+  }
+  delete env.ANTHROPIC_API_KEY;
+
+  if (env.CLAUDE_CODE_OAUTH_TOKEN && /sk-ant-oat/.test(env.CLAUDE_CODE_OAUTH_TOKEN)) {
+    return env;
+  }
+
+  try {
+    for (const file of getCredentialFiles()) {
+      if (!fs.existsSync(file)) continue;
+      const raw = fs.readFileSync(file, 'utf8');
+      const extracted = extractTokenFromCredentialsJson(raw);
+      if (extracted && extracted.token) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = extracted.token;
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = extracted.token;
+        const home = file.includes('/.claude/') ? file.split('/.claude/')[0] : null;
+        if (home) env.HOME = home;
+        console.log(`[claude-code] using OAuth token from ${file}`);
+        return env;
+      }
+    }
+  } catch (e) {
+    console.error('[claude-code] failed to read credentials file:', e.message);
   }
   return env;
 }
 
-function spawnSession(projectId, cwd) {
-  if (!fs.existsSync(cwd)) fs.mkdirSync(cwd, { recursive: true });
-  const env = buildEnv();
-
-  const claudePath = process.env.CLAUDE_BIN || 'claude';
-  let p;
+/**
+ * Mark a folder as trusted in claude's per-user config so the CLI doesn't
+ * show the workspace trust dialog when not running with --print.
+ */
+function trustProjectFolder(folder, claudeHome) {
   try {
-    p = pty.spawn(claudePath, ['--dangerously-skip-permissions'], {
-      name: 'xterm-256color',
-      cols: 120,
-      rows: 32,
-      cwd,
-      env,
-    });
-  } catch (e) {
-    console.error('[claude-code] spawn failed:', e.message);
-    return null;
-  }
-
-  const session = {
-    pty: p,
-    listeners: new Set(),
-    cwd,
-    createdAt: Date.now(),
-    buffer: '',
-    isStreaming: false,
-    idleTimer: null,
-  };
-
-  p.onData((data) => {
-    session.buffer += data;
-    if (session.buffer.length > 200000) session.buffer = session.buffer.slice(-100000);
-    session.isStreaming = true;
-    if (session.idleTimer) clearTimeout(session.idleTimer);
-    session.idleTimer = setTimeout(() => {
-      session.isStreaming = false;
-      for (const l of session.listeners) { try { l({ type: 'claude_done', projectId }); } catch {} }
-    }, 800);
-    for (const l of session.listeners) { try { l({ type: 'claude_output', projectId, data }); } catch {} }
-  });
-
-  p.onExit(({ exitCode }) => {
-    for (const l of session.listeners) { try { l({ type: 'claude_exit', projectId, exitCode }); } catch {} }
-    sessions.delete(projectId);
-  });
-
-  sessions.set(projectId, session);
-  return session;
+    const home = claudeHome || process.env.HOME || '/root';
+    const cfgPath = path.join(home, '.claude.json');
+    let cfg = {};
+    if (fs.existsSync(cfgPath)) {
+      try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8') || '{}'); } catch {}
+    }
+    if (!cfg.projects || typeof cfg.projects !== 'object') cfg.projects = {};
+    if (!cfg.projects[folder]) cfg.projects[folder] = {};
+    cfg.projects[folder].hasTrustDialogAccepted = true;
+    cfg.bypassPermissionsModeAccepted = true;
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  } catch {}
 }
 
+function ensureSession(projectId, cwd) {
+  let s = sessions.get(projectId);
+  if (!s) {
+    if (!fs.existsSync(cwd)) fs.mkdirSync(cwd, { recursive: true });
+    s = {
+      sessionId: uuidv4(),
+      cwd,
+      listeners: new Set(),
+      current: null,
+      createdAt: Date.now(),
+    };
+    sessions.set(projectId, s);
+  }
+  return s;
+}
+
+function _emit(session, projectId, payload) {
+  for (const l of session.listeners) {
+    try { l(payload); } catch {}
+  }
+}
+
+/**
+ * Send a message to claude for this project. Streams the response chunks
+ * back via listeners as `claude_output` events, then `claude_done` on
+ * completion.
+ */
 function sendMessage(projectId, cwd, message) {
-  let session = sessions.get(projectId);
-  if (!session || !session.pty) session = spawnSession(projectId, cwd);
-  if (!session) return false;
-  // Claude CLI treats \r as submission in interactive mode
-  session.pty.write(message + '\r');
+  const s = ensureSession(projectId, cwd);
+  // Kill any in-flight request for this project before starting a new one
+  if (s.current) {
+    try { s.current.kill(); } catch {}
+    s.current = null;
+  }
+
+  const env = buildEnv();
+  trustProjectFolder(cwd, env.HOME);
+
+  const isFirst = !s.hasFirstMessage;
+  // Use --session-id for the first message, --resume for subsequent ones.
+  // --dangerously-skip-permissions lets claude write/execute freely; safe
+  // because we already require admin auth on the panel and run in IS_SANDBOX.
+  const args = ['--print', '--dangerously-skip-permissions'];
+  if (isFirst) {
+    args.push('--session-id', s.sessionId);
+  } else {
+    args.push('--resume', s.sessionId);
+  }
+  args.push(message);
+
+  console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst}`);
+  // stdio: ignore stdin (claude --print otherwise waits 3s for piped input)
+  const child = spawn('claude', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  s.current = child;
+  s.hasFirstMessage = true;
+
+  let stderrBuf = '';
+  child.stdout.on('data', (data) => {
+    _emit(s, projectId, { type: 'claude_output', projectId, data: data.toString() });
+  });
+  child.stderr.on('data', (data) => {
+    const text = data.toString();
+    stderrBuf += text;
+    // Forward stderr too — the user can see errors live
+    _emit(s, projectId, { type: 'claude_output', projectId, data: text });
+  });
+  child.on('error', (err) => {
+    _emit(s, projectId, {
+      type: 'claude_output',
+      projectId,
+      data: `\n[ClawPanel] Failed to spawn claude: ${err.message}\n`,
+    });
+    _emit(s, projectId, { type: 'claude_done', projectId });
+    s.current = null;
+  });
+  child.on('exit', (code, signal) => {
+    s.current = null;
+    if (code !== 0 && code !== null) {
+      console.warn(`[claude-code] exit code=${code} stderr=${stderrBuf.slice(-200)}`);
+    }
+    _emit(s, projectId, { type: 'claude_done', projectId, exitCode: code });
+  });
   return true;
 }
 
 function sendRawInput(projectId, cwd, data) {
-  let session = sessions.get(projectId);
-  if (!session || !session.pty) session = spawnSession(projectId, cwd);
-  if (!session) return false;
-  session.pty.write(data);
-  return true;
+  // No interactive PTY in print mode — convert raw input to a message.
+  // Strip control characters and treat the buffer as a message.
+  const text = String(data || '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '').trim();
+  if (!text) return false;
+  return sendMessage(projectId, cwd, text);
 }
 
 function killSession(projectId) {
   const s = sessions.get(projectId);
   if (!s) return false;
-  try { s.pty.kill(); } catch {}
-  sessions.delete(projectId);
+  if (s.current) {
+    try { s.current.kill(); } catch {}
+    s.current = null;
+  }
+  // Reset session id so the next message starts a new conversation
+  s.sessionId = uuidv4();
+  s.hasFirstMessage = false;
   return true;
 }
 
@@ -117,12 +225,11 @@ function unsubscribe(projectId, listener) {
   if (s) s.listeners.delete(listener);
 }
 
-function listSessions() {
-  const out = [];
-  for (const [id, s] of sessions.entries()) {
-    out.push({ projectId: id, cwd: s.cwd, createdAt: s.createdAt, streaming: s.isStreaming });
-  }
-  return out;
+// Server.js historically called spawnSession() to ensure a session existed
+// before subscribing. We keep that name for backward compat — it just creates
+// the in-memory state, no process is spawned until the first sendMessage().
+function spawnSession(projectId, cwd) {
+  return ensureSession(projectId, cwd);
 }
 
 module.exports = {

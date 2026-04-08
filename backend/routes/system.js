@@ -102,49 +102,121 @@ function tryVersionCheck() {
   }
 }
 
-/** Attempt 4: read ~/.claude/credentials.json directly */
-function tryCredentialsFile() {
+/**
+ * Attempt 4: read ~/.claude/.credentials.json directly.
+ *
+ * The real format used by `claude setup-token` is:
+ *   { "claudeAiOauth": { "accessToken": "sk-ant-oat01-...", ... } }
+ *
+ * We look for nested OAuth fields, top-level token fields, or any
+ * sk-ant-oat string anywhere in the file. Returns the extracted token
+ * so other parts of the system can pass it as CLAUDE_CODE_OAUTH_TOKEN.
+ */
+function getCredentialFiles() {
+  const homes = new Set();
+  if (process.env.HOME) homes.add(process.env.HOME);
+  homes.add('/root');
+  // Also check common dev install locations
+  homes.add('/home/' + (process.env.USER || ''));
+  const files = [];
+  for (const h of homes) {
+    if (!h || h === '/home/') continue;
+    files.push(path.join(h, '.claude', '.credentials.json'));
+    files.push(path.join(h, '.claude', 'credentials.json'));
+  }
+  return files;
+}
+
+function extractTokenFromCredentialsJson(raw) {
+  if (!raw || !raw.trim()) return null;
+  // Try parse first — handles nested objects properly
   try {
-    const home = process.env.HOME || '/root';
-    const candidates = [
-      path.join(home, '.claude', '.credentials.json'),
-      path.join(home, '.claude', 'credentials.json'),
-    ];
-    for (const file of candidates) {
+    const j = JSON.parse(raw);
+    // Common shapes:
+    //  { claudeAiOauth: { accessToken: "..." } }
+    //  { access_token: "..." }
+    //  { oauth_token: "..." }
+    //  { token: "sk-ant-..." }
+    if (j.claudeAiOauth && typeof j.claudeAiOauth === 'object') {
+      const t = j.claudeAiOauth.accessToken || j.claudeAiOauth.access_token;
+      if (t) return { token: t, email: j.claudeAiOauth.email || null, sub: j.claudeAiOauth.subscriptionType || null };
+    }
+    if (j.access_token) return { token: j.access_token, email: j.email || null };
+    if (j.oauth_token || j.oauthToken) return { token: j.oauth_token || j.oauthToken, email: j.email || null };
+    if (j.token && /sk-ant-/i.test(j.token)) return { token: j.token, email: j.email || null };
+  } catch {}
+  // Fallback: regex sweep for sk-ant-oat pattern
+  const m = raw.match(/sk-ant-oat[A-Za-z0-9_-]+/);
+  if (m) return { token: m[0], email: null };
+  return null;
+}
+
+function tryCredentialsFile() {
+  for (const file of getCredentialFiles()) {
+    try {
       if (!fsLib.existsSync(file)) continue;
-      let raw = '';
-      try { raw = fsLib.readFileSync(file, 'utf8'); } catch { continue; }
-      if (!raw.trim()) continue;
-      // Token files contain a JSON blob with an access_token / oauth token / sk-ant-oat
-      const hasToken =
-        /sk-ant-oat[A-Za-z0-9_-]+/.test(raw) ||
-        /"access_token"\s*:\s*"[^"]+"/.test(raw) ||
-        /"oauth(?:_token|Token)"\s*:\s*"[^"]+"/.test(raw) ||
-        /"token"\s*:\s*"sk-ant-/i.test(raw);
-      if (hasToken) {
-        let email = null;
-        const m = raw.match(/"email"\s*:\s*"([^"]+)"/);
-        if (m) email = m[1];
+      const raw = fsLib.readFileSync(file, 'utf8');
+      const extracted = extractTokenFromCredentialsJson(raw);
+      if (extracted && extracted.token) {
         return {
           source: 'credentials_file',
           loggedIn: true,
           authMethod: 'oauth',
-          email,
+          email: extracted.email,
+          subscriptionType: extracted.sub || null,
+          token: extracted.token,
           file,
         };
       }
-    }
-  } catch {}
+    } catch {}
+  }
+  return null;
+}
+
+/** Attempt 5: env / .env file fallback */
+function tryEnvToken() {
+  // Direct env var
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN && /sk-ant-oat/.test(process.env.CLAUDE_CODE_OAUTH_TOKEN)) {
+    return { source: 'env', loggedIn: true, authMethod: 'oauth', token: process.env.CLAUDE_CODE_OAUTH_TOKEN };
+  }
+  // .env file in backend dir (in case PM2 didn't pick up the var)
+  const envCandidates = [
+    path.join(__dirname, '..', '.env'),
+    '/opt/clawpanel/backend/.env',
+    '/root/clawpanel/backend/.env',
+  ];
+  for (const f of envCandidates) {
+    try {
+      if (!fsLib.existsSync(f)) continue;
+      const raw = fsLib.readFileSync(f, 'utf8');
+      const m = raw.match(/CLAUDE_CODE_OAUTH_TOKEN\s*=\s*["']?(sk-ant-oat[A-Za-z0-9_-]+)["']?/);
+      if (m) {
+        // Cache into process.env for subsequent calls
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = m[1];
+        return { source: 'env_file', loggedIn: true, authMethod: 'oauth', token: m[1], file: f };
+      }
+    } catch {}
+  }
   return null;
 }
 
 function runClaudeAuthStatus() {
+  // Order of precedence — return as soon as we find a valid token
+  const env = tryEnvToken();
+  if (env) {
+    // Cache to process.env so other components (claude-code spawner) see it
+    if (env.token) process.env.CLAUDE_CODE_OAUTH_TOKEN = env.token;
+    return { ok: true, ...env };
+  }
+  const f = tryCredentialsFile();
+  if (f) {
+    if (f.token) process.env.CLAUDE_CODE_OAUTH_TOKEN = f.token;
+    return { ok: true, ...f };
+  }
   const j = tryJsonStatus();
   if (j && j.loggedIn) return { ok: true, ...j };
   const p = tryPlainTextStatus();
   if (p && p.loggedIn) return { ok: true, ...p };
-  const f = tryCredentialsFile();
-  if (f) return { ok: true, ...f };
   // Fall back to whatever the structured calls returned (even if loggedIn=false)
   if (j) return { ok: true, ...j };
   if (p) return { ok: true, ...p };
@@ -357,4 +429,11 @@ router.put('/settings', (req, res) => {
   res.json({ ok: true });
 });
 
-module.exports = { router, getStats, checkClaudeStatus };
+module.exports = {
+  router,
+  getStats,
+  checkClaudeStatus,
+  // exposed for claude-code.js to inject creds when spawning the chat PTY
+  getCredentialFiles,
+  extractTokenFromCredentialsJson,
+};

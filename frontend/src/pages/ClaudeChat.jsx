@@ -54,12 +54,18 @@ export default function ClaudeChat() {
     );
   }, []);
 
-  // Load Claude status on mount
+  // Load Claude status on mount and re-check every 30 seconds
   useEffect(() => {
-    api.get('/api/system/claude-status').then((d) => {
+    let alive = true;
+    const load = () => api.get('/api/system/claude-status').then((d) => {
+      if (!alive) return;
       setClaudeStatus(d);
-      if (!d.installed || !d.authenticated) setClaudeCliError(true);
+      const ok = d.installed && d.authenticated;
+      setClaudeCliError(!ok);
     }).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
   const onWsMessage = useCallback((msg) => {
