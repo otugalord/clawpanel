@@ -1,10 +1,15 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import {
-  Plus, Copy, Trash2, CheckCircle2, XCircle, ExternalLink,
-  RefreshCw, Key, LogIn, AlertCircle,
+  Plus, Copy, Trash2, CheckCircle2, XCircle,
+  RefreshCw, Key, LogIn,
 } from 'lucide-react';
+import { Terminal as Xterm } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import '@xterm/xterm/css/xterm.css';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 export default function Settings() {
   const [settings, setSettings] = useState({});
@@ -16,12 +21,18 @@ export default function Settings() {
   // Claude auth state
   const [claudeStatus, setClaudeStatus] = useState(null);
   const [authTab, setAuthTab] = useState('oauth'); // 'oauth' | 'api_key'
-  const [loginUrl, setLoginUrl] = useState('');
-  const [loginLoading, setLoginLoading] = useState(false);
-  const [loginPolling, setLoginPolling] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiKeySaving, setApiKeySaving] = useState(false);
+
+  // Embedded auth-terminal state
+  const [authTermActive, setAuthTermActive] = useState(false);
+  const [authTermSessionId, setAuthTermSessionId] = useState(null);
+  const [authTermLoading, setAuthTermLoading] = useState(false);
+  const [loginPolling, setLoginPolling] = useState(false);
   const pollRef = useRef(null);
+  const authTermContainerRef = useRef(null);
+  const xtermRef = useRef(null);
+  const fitRef = useRef(null);
 
   const loadSettings = async () => {
     try {
@@ -48,7 +59,18 @@ export default function Settings() {
   useEffect(() => {
     loadSettings();
     loadClaudeStatus();
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      // Kill any lingering auth terminal session when leaving the page
+      if (authTermSessionId) {
+        try { wsSendRef.current?.({ type: 'auth_terminal_kill', sessionId: authTermSessionId }); } catch {}
+      }
+      if (xtermRef.current) {
+        try { xtermRef.current.dispose(); } catch {}
+        xtermRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Default tab follows what's currently active
@@ -56,19 +78,14 @@ export default function Settings() {
     if (claudeStatus?.authMethod === 'api_key') setAuthTab('api_key');
   }, [claudeStatus?.authMethod]);
 
-  const hasApiKeySaved =
-    settings.anthropic_api_key && settings.anthropic_api_key.length > 0;
-
-  // ─── OAuth flow ────────────────────────────────────────────────
-  const startOAuth = async () => {
-    setLoginLoading(true);
-    setLoginUrl('');
-    try {
-      const d = await api.post('/api/system/claude-login/start', {});
-      if (d.ok && d.url) {
-        setLoginUrl(d.url);
-        toast.success('Sign-in link ready — click below');
-        // Start polling for auth status
+  // ─── WebSocket bridge for auth terminal ────────────────────────
+  const wsSendRef = useRef(null);
+  const onWsMessage = useCallback((msg) => {
+    if (msg.type === 'auth_terminal_ready') {
+      setAuthTermSessionId(msg.sessionId);
+      setAuthTermLoading(false);
+      // Start polling for auth status
+      if (!pollRef.current) {
         setLoginPolling(true);
         pollRef.current = setInterval(async () => {
           const s = await loadClaudeStatus();
@@ -76,39 +93,111 @@ export default function Settings() {
             clearInterval(pollRef.current);
             pollRef.current = null;
             setLoginPolling(false);
-            setLoginUrl('');
             toast.success('Claude connected ✓');
+            // Kill the auth terminal gracefully
+            closeAuthTerminal();
           }
         }, 3000);
-      } else {
-        toast.error(d.error || 'Could not start sign-in');
       }
-    } catch (e) {
-      toast.error(e.message);
-    } finally {
-      setLoginLoading(false);
+    } else if (msg.type === 'auth_terminal_output' && msg.sessionId === authTermSessionId) {
+      if (xtermRef.current) {
+        xtermRef.current.write(msg.data);
+      }
+    } else if (msg.type === 'auth_terminal_exit' && msg.sessionId === authTermSessionId) {
+      if (xtermRef.current) {
+        xtermRef.current.write('\r\n\x1b[33m[session ended]\x1b[0m\r\n');
+      }
+    } else if (msg.type === 'auth_terminal_error') {
+      toast.error(msg.error || 'Failed to start auth terminal');
+      setAuthTermLoading(false);
+      setAuthTermActive(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authTermSessionId]);
+
+  const { send: wsSend, connected: wsConnected } = useWebSocket(onWsMessage);
+  useEffect(() => { wsSendRef.current = wsSend; }, [wsSend]);
+
+  // Initialize xterm when the auth terminal becomes active
+  useEffect(() => {
+    if (!authTermActive || !authTermContainerRef.current) return;
+    // Create xterm once
+    if (!xtermRef.current) {
+      const term = new Xterm({
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        fontSize: 12,
+        cursorBlink: true,
+        theme: {
+          background: '#0a0b14',
+          foreground: '#e5e5e5',
+          cursor: '#6c63ff',
+          selectionBackground: '#6c63ff44',
+        },
+        allowProposedApi: true,
+        convertEol: true,
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+      term.loadAddon(new WebLinksAddon((event, uri) => {
+        // Open URL in a new tab on click
+        window.open(uri, '_blank', 'noopener,noreferrer');
+      }));
+      term.open(authTermContainerRef.current);
+      try { fit.fit(); } catch {}
+      term.onData((data) => {
+        if (authTermSessionId && wsSendRef.current) {
+          wsSendRef.current({ type: 'auth_terminal_input', sessionId: authTermSessionId, data });
+        }
+      });
+      term.onResize(({ cols, rows }) => {
+        if (authTermSessionId && wsSendRef.current) {
+          wsSendRef.current({ type: 'auth_terminal_resize', sessionId: authTermSessionId, cols, rows });
+        }
+      });
+      xtermRef.current = term;
+      fitRef.current = fit;
+    }
+    // Request a new session if we don't have one yet
+    if (!authTermSessionId && wsSendRef.current) {
+      setAuthTermLoading(true);
+      wsSendRef.current({ type: 'auth_terminal_create' });
+    }
+    const onResize = () => { try { fitRef.current?.fit(); } catch {} };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [authTermActive, authTermSessionId]);
+
+  const hasApiKeySaved =
+    settings.anthropic_api_key && settings.anthropic_api_key.length > 0;
+
+  // ─── OAuth flow — embedded terminal ────────────────────────────
+  const startOAuth = () => {
+    if (!wsConnected) {
+      toast.error('WebSocket not connected yet — try again in a second');
+      return;
+    }
+    setAuthTermActive(true);
+    setAuthTermSessionId(null);
+    // The effect above will create the session once the container mounts
   };
 
-  const openLoginUrl = () => {
-    if (!loginUrl) return;
-    // Explicit user click = not blocked by browser popup blocker
-    window.open(loginUrl, '_blank', 'noopener,noreferrer');
-  };
-
-  const copyLoginUrl = () => {
-    if (!loginUrl) return;
-    navigator.clipboard.writeText(loginUrl).then(
-      () => toast.success('URL copied to clipboard'),
-      () => toast.error('Failed to copy — select the text manually'),
-    );
-  };
-
-  const cancelOAuth = async () => {
-    try { await api.post('/api/system/claude-login/cancel', {}); } catch {}
-    if (pollRef.current) clearInterval(pollRef.current);
+  const closeAuthTerminal = () => {
+    if (authTermSessionId && wsSendRef.current) {
+      try { wsSendRef.current({ type: 'auth_terminal_kill', sessionId: authTermSessionId }); } catch {}
+    }
+    if (xtermRef.current) {
+      try { xtermRef.current.dispose(); } catch {}
+      xtermRef.current = null;
+      fitRef.current = null;
+    }
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setAuthTermActive(false);
+    setAuthTermSessionId(null);
+    setAuthTermLoading(false);
     setLoginPolling(false);
-    setLoginUrl('');
   };
 
   // ─── API Key ───────────────────────────────────────────────────
@@ -301,25 +390,25 @@ export default function Settings() {
                   Sign in with your Anthropic account. No credit card required if you already have a Claude Pro/Team subscription — your Claude Code usage is included.
                   <br /><strong style={{ color: 'var(--text)' }}>Sign in once and Claude works forever.</strong>
                 </div>
-                {!loginUrl && !loginPolling && (
+                {!authTermActive && (
                   <button
                     className="btn btn-lg"
                     onClick={startOAuth}
-                    disabled={loginLoading || !claudeStatus?.installed}
+                    disabled={authTermLoading || !claudeStatus?.installed || !wsConnected}
                   >
-                    {loginLoading ? 'Preparing sign-in…' : (
+                    {authTermLoading ? 'Preparing sign-in…' : (
                       <>
                         <LogIn size={15} /> Sign in with Anthropic
                       </>
                     )}
                   </button>
                 )}
-                {(loginUrl || loginPolling) && (
+                {authTermActive && (
                   <div style={{
                     background: 'linear-gradient(135deg, rgba(108,99,255,.08), rgba(108,99,255,.02))',
                     border: '1px solid rgba(108,99,255,.25)',
                     borderRadius: 12,
-                    padding: 20,
+                    padding: 18,
                   }}>
                     <div style={{
                       fontSize: 11,
@@ -327,7 +416,7 @@ export default function Settings() {
                       color: 'var(--accent)',
                       textTransform: 'uppercase',
                       letterSpacing: 1.5,
-                      marginBottom: 14,
+                      marginBottom: 12,
                       display: 'flex',
                       alignItems: 'center',
                       gap: 8,
@@ -340,93 +429,54 @@ export default function Settings() {
                         boxShadow: '0 0 0 4px rgba(108,99,255,.2)',
                         animation: 'ts-blink 1.6s infinite',
                       }} />
-                      Step 1: Open the Anthropic login page
+                      Claude is starting the sign-in flow
                     </div>
 
-                    {loginUrl && (
-                      <>
-                        {/* Big prominent button */}
-                        <button
-                          className="btn btn-lg"
-                          onClick={openLoginUrl}
-                          style={{
-                            width: '100%',
-                            justifyContent: 'center',
-                            padding: '14px 20px',
-                            fontSize: 14,
-                            marginBottom: 14,
-                          }}
-                        >
-                          <ExternalLink size={16} /> Open Anthropic Login →
-                        </button>
+                    {/* Embedded xterm.js */}
+                    <div
+                      ref={authTermContainerRef}
+                      style={{
+                        background: '#0a0b14',
+                        border: '1px solid var(--border)',
+                        borderRadius: 10,
+                        padding: 8,
+                        height: 300,
+                        marginBottom: 12,
+                        overflow: 'hidden',
+                      }}
+                    />
 
-                        <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8 }}>
-                          Or copy the URL and open it in any browser:
-                        </div>
-
-                        {/* Copyable URL box */}
-                        <div style={{
-                          background: 'var(--bg)',
-                          border: '1px solid var(--border)',
-                          borderRadius: 8,
-                          padding: '10px 12px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: 8,
-                          marginBottom: 12,
-                        }}>
-                          <input
-                            type="text"
-                            value={loginUrl}
-                            readOnly
-                            onFocus={(e) => e.target.select()}
-                            onClick={(e) => e.target.select()}
-                            style={{
-                              flex: 1,
-                              minWidth: 0,
-                              background: 'transparent',
-                              border: 'none',
-                              color: 'var(--text)',
-                              fontSize: 11,
-                              fontFamily: 'Menlo, Monaco, monospace',
-                              outline: 'none',
-                            }}
-                          />
-                          <button
-                            className="btn btn-sm btn-ghost"
-                            onClick={copyLoginUrl}
-                            style={{ flexShrink: 0 }}
-                          >
-                            <Copy size={12} /> Copy
-                          </button>
-                        </div>
-
-                        <div style={{
-                          fontSize: 11,
-                          color: 'var(--text-muted)',
-                          padding: '8px 10px',
-                          background: 'var(--bg2)',
-                          borderRadius: 6,
-                          borderLeft: '2px solid var(--accent)',
-                          marginBottom: 14,
-                        }}>
-                          💡 <strong style={{ color: 'var(--text-dim)' }}>Step 2:</strong> Sign in to Anthropic in the new tab. When done, come back here — this page will auto-detect it.
-                        </div>
-                      </>
-                    )}
+                    <div style={{
+                      fontSize: 12,
+                      color: 'var(--text-dim)',
+                      padding: '10px 12px',
+                      background: 'var(--bg2)',
+                      borderRadius: 6,
+                      borderLeft: '2px solid var(--accent)',
+                      marginBottom: 12,
+                      lineHeight: 1.6,
+                    }}>
+                      👉 <strong style={{ color: 'var(--text)' }}>Click the URL above</strong> to open the Anthropic login page in a new tab.
+                      Sign in, then come back — this page will auto-detect it.
+                      If a code is requested, type or paste it directly into the terminal above.
+                    </div>
 
                     <div style={{
                       display: 'flex',
                       alignItems: 'center',
                       gap: 10,
-                      padding: '10px 0',
+                      padding: '10px 0 0',
                       borderTop: '1px solid var(--border)',
                     }}>
                       <div className="spinner" />
                       <span style={{ fontSize: 12, color: 'var(--text-dim)', flex: 1 }}>
-                        Waiting for sign-in… checking every 3 seconds
+                        {loginPolling
+                          ? 'Waiting for sign-in… checking every 3 seconds'
+                          : authTermLoading
+                          ? 'Starting claude auth login…'
+                          : 'Follow the instructions in the terminal above'}
                       </span>
-                      <button className="btn btn-sm btn-ghost" onClick={cancelOAuth}>
+                      <button className="btn btn-sm btn-ghost" onClick={closeAuthTerminal}>
                         Cancel
                       </button>
                     </div>

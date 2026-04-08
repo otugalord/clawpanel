@@ -19,6 +19,7 @@ const terminalRouter = require('./routes/terminal');
 const { router: systemRouter, getStats } = require('./routes/system');
 const claudeSvc = require('./services/claude-code');
 const { terminalManager } = require('./services/terminal-manager');
+const { authTerminal } = require('./services/auth-terminal');
 const pm2svc = require('./services/pm2');
 
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -105,6 +106,7 @@ wss.on('connection', (ws, req) => {
 
   ws.claudeSubs = new Set(); // projectIds
   ws.terminalSubs = new Set(); // session ids
+  ws.authTerminalSubs = new Set(); // auth terminal session ids
   ws.statsSubscribed = false;
 
   ws.on('message', (raw) => {
@@ -116,12 +118,14 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     for (const pid of ws.claudeSubs) claudeSvc.unsubscribe(pid, ws.claudeListener);
     for (const sid of ws.terminalSubs) terminalManager.unsubscribe(sid, ws.terminalListener);
+    for (const sid of ws.authTerminalSubs) authTerminal.unsubscribe(sid, ws.authTerminalListener);
     statsSubs.delete(ws);
     for (const set of logSubs.values()) set.delete(ws);
   });
 
   ws.claudeListener = (payload) => wsSend(ws, payload);
   ws.terminalListener = (payload) => wsSend(ws, payload);
+  ws.authTerminalListener = (payload) => wsSend(ws, payload);
 
   wsSend(ws, { type: 'ready' });
 });
@@ -196,6 +200,31 @@ async function handleMessage(ws, msg) {
     case 'terminal_kill': {
       terminalManager.kill(msg.sessionId);
       ws.terminalSubs.delete(msg.sessionId);
+      break;
+    }
+    // ─── AUTH TERMINAL (claude auth login PTY) ─────────────────
+    case 'auth_terminal_create': {
+      const result = authTerminal.create();
+      if (result.error) {
+        wsSend(ws, { type: 'auth_terminal_error', error: result.error });
+        break;
+      }
+      authTerminal.subscribe(result.id, ws.authTerminalListener);
+      ws.authTerminalSubs.add(result.id);
+      wsSend(ws, { type: 'auth_terminal_ready', sessionId: result.id });
+      break;
+    }
+    case 'auth_terminal_input': {
+      authTerminal.write(msg.sessionId, msg.data || '');
+      break;
+    }
+    case 'auth_terminal_resize': {
+      authTerminal.resize(msg.sessionId, msg.cols || 100, msg.rows || 24);
+      break;
+    }
+    case 'auth_terminal_kill': {
+      authTerminal.kill(msg.sessionId);
+      ws.authTerminalSubs.delete(msg.sessionId);
       break;
     }
     case 'subscribe_stats': {

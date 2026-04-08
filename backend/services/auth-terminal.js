@@ -1,0 +1,118 @@
+/**
+ * Auth Terminal manager — spawns `claude auth login` as a PTY session
+ * that the browser can attach to via WebSocket. Unlike the previous "parse
+ * URL from backend" approach, the user sees the real terminal output and
+ * can click the URL themselves. Session lifetime is capped at 5 minutes.
+ */
+const pty = require('node-pty');
+const { v4: uuidv4 } = require('uuid');
+
+const MAX_SESSION_MS = 5 * 60 * 1000; // 5 minutes
+
+class AuthTerminalManager {
+  constructor() {
+    this.sessions = new Map(); // id -> { pty, listeners:Set, createdAt, timer }
+  }
+
+  create() {
+    // Only ever keep one live auth session at a time — kill any previous
+    for (const id of Array.from(this.sessions.keys())) {
+      this.kill(id);
+    }
+
+    const id = uuidv4();
+    const env = { ...process.env, TERM: 'xterm-256color' };
+    // Remove any inherited API key so the CLI runs a real OAuth flow
+    delete env.ANTHROPIC_API_KEY;
+
+    let p;
+    try {
+      p = pty.spawn('claude', ['auth', 'login'], {
+        name: 'xterm-256color',
+        cols: 100,
+        rows: 24,
+        cwd: process.env.HOME || '/root',
+        env,
+      });
+    } catch (e) {
+      return { error: 'Failed to spawn claude: ' + e.message };
+    }
+
+    const session = {
+      id,
+      pty: p,
+      listeners: new Set(),
+      createdAt: Date.now(),
+      timer: null,
+      output: '', // small rolling buffer so late subscribers see what happened
+    };
+
+    p.onData((data) => {
+      session.output += data;
+      if (session.output.length > 20000) {
+        session.output = session.output.slice(-12000);
+      }
+      for (const l of session.listeners) {
+        try { l({ type: 'auth_terminal_output', sessionId: id, data }); } catch {}
+      }
+    });
+
+    p.onExit(({ exitCode }) => {
+      for (const l of session.listeners) {
+        try { l({ type: 'auth_terminal_exit', sessionId: id, exitCode }); } catch {}
+      }
+      if (session.timer) clearTimeout(session.timer);
+      this.sessions.delete(id);
+    });
+
+    // Auto-kill after 5 minutes
+    session.timer = setTimeout(() => {
+      try { p.kill(); } catch {}
+    }, MAX_SESSION_MS);
+
+    this.sessions.set(id, session);
+    return { id, createdAt: session.createdAt };
+  }
+
+  write(id, data) {
+    const s = this.sessions.get(id);
+    if (!s) return false;
+    try { s.pty.write(data); return true; } catch { return false; }
+  }
+
+  resize(id, cols, rows) {
+    const s = this.sessions.get(id);
+    if (!s) return false;
+    try { s.pty.resize(cols, rows); return true; } catch { return false; }
+  }
+
+  subscribe(id, listener) {
+    const s = this.sessions.get(id);
+    if (!s) return false;
+    s.listeners.add(listener);
+    // Replay buffered output so new subscribers catch up
+    if (s.output) {
+      try { listener({ type: 'auth_terminal_output', sessionId: id, data: s.output }); } catch {}
+    }
+    return true;
+  }
+
+  unsubscribe(id, listener) {
+    const s = this.sessions.get(id);
+    if (s) s.listeners.delete(listener);
+  }
+
+  kill(id) {
+    const s = this.sessions.get(id);
+    if (!s) return false;
+    try { s.pty.kill(); } catch {}
+    if (s.timer) clearTimeout(s.timer);
+    this.sessions.delete(id);
+    return true;
+  }
+
+  get(id) { return this.sessions.get(id) || null; }
+}
+
+const authTerminal = new AuthTerminalManager();
+module.exports = { authTerminal };
