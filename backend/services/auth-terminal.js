@@ -46,12 +46,17 @@ class AuthTerminalManager extends EventEmitter {
     // Remove any inherited API key so the CLI runs a real OAuth flow
     delete env.ANTHROPIC_API_KEY;
 
+    // Use `claude setup-token` rather than `claude auth login` because:
+    //  - setup-token has an interactive Ink TUI that stays alive waiting for
+    //    the user to paste the code via stdin
+    //  - auth login prints the URL then sits silently with no input prompt
+    //  - setup-token validates the code immediately and reports success/error
     let p;
     try {
-      p = pty.spawn('claude', ['auth', 'login'], {
+      p = pty.spawn('claude', ['setup-token'], {
         name: 'xterm-256color',
         cols: 100,
-        rows: 24,
+        rows: 30,
         cwd: process.env.HOME || '/root',
         env,
       });
@@ -78,6 +83,29 @@ class AuthTerminalManager extends EventEmitter {
       }
       for (const l of session.listeners) {
         try { l({ type: 'auth_terminal_output', sessionId: id, data }); } catch {}
+      }
+      // Detect auth-completion signals from setup-token's TUI output.
+      // Real claude success strings observed in cli.js:
+      //   "Logged in as ..."
+      //   "Authentication successful, but ..."
+      //   "Successfully logged in"
+      const cleanRecent = session.output
+        .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+        .replace(/\x1b\][^\x07]*\x07/g, '')
+        .slice(-1500)
+        .toLowerCase();
+      if (
+        !session.completed &&
+        (cleanRecent.includes('logged in as') ||
+         cleanRecent.includes('authentication successful') ||
+         cleanRecent.includes('successfully logged in') ||
+         cleanRecent.includes('token saved'))
+      ) {
+        session.completed = true;
+        console.log('[auth-terminal] success detected from claude output');
+        try {
+          this.emit('auth_code_submitted', { sessionId: id, reason: 'success_detected' });
+        } catch {}
       }
     });
 

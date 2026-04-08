@@ -46,6 +46,10 @@ export default function Settings() {
   const authTermContainerRef = useRef(null);
   const xtermRef = useRef(null);
   const fitRef = useRef(null);
+  // Snapshot of the auth state when the user clicked Sign in. We only treat
+  // a status check as "newly authenticated" if it differs from this baseline.
+  // Prevents false positives on systems where the user was already signed in.
+  const baselineRef = useRef(null);
 
   const loadSettings = async () => {
     try {
@@ -102,12 +106,11 @@ export default function Settings() {
         setLoginPolling(true);
         pollRef.current = setInterval(async () => {
           const s = await loadClaudeStatus();
-          if (s?.authenticated) {
+          if (isNewAuth(s)) {
             clearInterval(pollRef.current);
             pollRef.current = null;
             setLoginPolling(false);
             toast.success('Claude connected ✓');
-            // Kill the auth terminal gracefully
             closeAuthTerminal();
           }
         }, 3000);
@@ -131,10 +134,11 @@ export default function Settings() {
       setAuthTermLoading(false);
       setAuthTermActive(false);
     } else if (msg.type === 'claude_auth_result') {
-      // Server-triggered immediate check after user submitted a code.
-      // Refresh the local status card and, if authenticated, celebrate.
+      // Server-triggered immediate check after user submitted a code or
+      // after the PTY exited. Refresh the local status card and, if this
+      // represents a real auth change vs the baseline, celebrate.
       loadClaudeStatus();
-      if (msg.authenticated) {
+      if (isNewAuth(msg)) {
         if (pollRef.current) {
           clearInterval(pollRef.current);
           pollRef.current = null;
@@ -237,9 +241,27 @@ export default function Settings() {
       toast.error('WebSocket not connected yet — try again in a second');
       return;
     }
+    // Snapshot baseline so post-input checks only succeed if state changed
+    baselineRef.current = {
+      authenticated: !!claudeStatus?.authenticated,
+      authMethod: claudeStatus?.authMethod || null,
+      email: claudeStatus?.email || null,
+    };
     setAuthTermActive(true);
     setAuthTermSessionId(null);
     // The effect above will create the session once the container mounts
+  };
+
+  // True if a status payload represents a *change* from the baseline
+  const isNewAuth = (status) => {
+    if (!status?.authenticated) return false;
+    const baseline = baselineRef.current;
+    if (!baseline) return true; // no baseline → trust the status
+    // Different account or wasn't authenticated before → real new auth
+    if (!baseline.authenticated) return true;
+    if (baseline.email && status.email && baseline.email !== status.email) return true;
+    if (baseline.authMethod && status.authMethod && baseline.authMethod !== status.authMethod) return true;
+    return false;
   };
 
   const closeAuthTerminal = () => {
