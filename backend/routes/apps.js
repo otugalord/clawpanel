@@ -2,10 +2,18 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const net = require('net');
+const { execSync } = require('child_process');
 const { db, getSetting } = require('../db/database');
 const pm2svc = require('../services/pm2');
 
 const router = express.Router();
+
+function openPort(port) {
+  if (!port) return;
+  try {
+    execSync(`ufw allow ${port}/tcp 2>/dev/null`, { stdio: 'ignore', timeout: 5000 });
+  } catch {}
+}
 
 function slugify(name) {
   return String(name || '').toLowerCase().trim().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'app';
@@ -74,6 +82,7 @@ router.post('/', async (req, res) => {
       .prepare('INSERT INTO apps(name,folder,port,status,script) VALUES (?,?,?,?,?)')
       .run(slug, folder, port, 'stopped', script || '');
     const app = db.prepare('SELECT * FROM apps WHERE id=?').get(info.lastInsertRowid);
+    openPort(port);
     res.json({ app });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -156,6 +165,7 @@ router.post('/:id/start', async (req, res) => {
     if (script === 'npm') { opts.script = 'npm'; opts.args = 'start'; }
     else { opts.script = path.isAbsolute(script) ? script : path.join(app.folder, script); }
     await pm2svc.start(opts);
+    openPort(app.port);
     db.prepare('UPDATE apps SET status=? WHERE id=?').run('online', app.id);
     res.json({ ok: true });
   } catch (e) {

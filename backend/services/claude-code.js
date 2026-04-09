@@ -23,7 +23,8 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { getSetting } = require('../db/database');
-const { getCredentialFiles, extractTokenFromCredentialsJson } = require('../routes/system');
+const { getCredentialFiles, extractTokenFromCredentialsJson, getServerIp } = require('../routes/system');
+const { db } = require('../db/database');
 
 // ─── Non-root user for spawning claude ───────────────────────────────────
 // Running claude as root triggers "--dangerously-skip-permissions cannot be
@@ -292,6 +293,34 @@ function _emit(session, projectId, payload) {
 }
 
 /**
+ * Build a system prompt with project context so Claude knows where it is
+ * and uses real IPs instead of localhost.
+ */
+function buildSystemPrompt(projectId) {
+  try {
+    const app = db.prepare('SELECT * FROM apps WHERE id=?').get(projectId);
+    if (!app) return null;
+    const ip = getServerIp();
+    const publicUrl = app.domain ? `https://${app.domain}` : `http://${ip}:${app.port}`;
+    return `You are Claude Code running inside ClawPanel on a VPS.
+Current project: ${app.name}
+Project folder: ${app.folder}
+Port: ${app.port}
+Server IP: ${ip}
+Public URL: ${publicUrl}
+
+IMPORTANT RULES:
+- Always use the project folder (${app.folder}) for all file operations
+- When referencing the app URL, always use: ${publicUrl} (never localhost)
+- When starting servers, bind to 0.0.0.0 not localhost
+- Use port ${app.port} for this project
+- Never reference localhost - always use ${ip} or 0.0.0.0`;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Send a message to claude for this project. Streams the response chunks
  * back via listeners as `claude_output` events, then `claude_done` on
  * completion.
@@ -337,6 +366,9 @@ function sendMessage(projectId, cwd, message) {
     if (willDrop) args.push('--dangerously-skip-permissions');
     if (isFirst) {
       args.push('--session-id', s.sessionId);
+      // Inject project context on first message so Claude knows the VPS setup
+      const sysPrompt = buildSystemPrompt(projectId);
+      if (sysPrompt) args.push('--system-prompt', sysPrompt);
     } else {
       args.push('--resume', s.sessionId);
     }

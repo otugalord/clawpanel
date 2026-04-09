@@ -433,11 +433,37 @@ router.put('/settings', (req, res) => {
   res.json({ ok: true });
 });
 
+// GET /api/system/info — public IP, hostname, OS
+let _cachedIp = null;
+function getServerIp() {
+  if (_cachedIp) return _cachedIp;
+  try {
+    _cachedIp = execSync("hostname -I | awk '{print $1}'", { encoding: 'utf8', timeout: 3000 }).trim();
+  } catch {
+    _cachedIp = '127.0.0.1';
+  }
+  return _cachedIp;
+}
+
+router.get('/info', async (req, res) => {
+  try {
+    const osinfo = await si.osInfo();
+    res.json({
+      ip: getServerIp(),
+      hostname: osinfo.hostname,
+      os: osinfo.distro || osinfo.platform,
+      uptime: os.uptime(),
+    });
+  } catch (e) {
+    res.json({ ip: getServerIp(), hostname: os.hostname(), os: os.platform(), uptime: os.uptime() });
+  }
+});
+
 module.exports = {
   router,
   getStats,
   checkClaudeStatus,
-  // exposed for claude-code.js to inject creds when spawning the chat PTY
+  getServerIp,
   getCredentialFiles,
   extractTokenFromCredentialsJson,
 };

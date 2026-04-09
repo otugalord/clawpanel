@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { Send, Eye, EyeOff, RotateCw, Trash2, Sparkles, Settings as SettingsIcon } from 'lucide-react';
+import { Send, Eye, EyeOff, RotateCw, Trash2, Sparkles, Settings as SettingsIcon, ExternalLink } from 'lucide-react';
 import { marked } from 'marked';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
@@ -38,6 +38,7 @@ export default function ClaudeChat() {
   const [showPreview, setShowPreview] = useState(false);
   const [claudeCliError, setClaudeCliError] = useState(false);
   const [claudeStatus, setClaudeStatus] = useState(null);
+  const [serverInfo, setServerInfo] = useState(null);
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -97,6 +98,7 @@ export default function ClaudeChat() {
 
   useEffect(() => {
     api.get('/api/apps').then((d) => setApps(d.apps || [])).catch(() => {});
+    api.get('/api/system/info').then(setServerInfo).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -194,6 +196,18 @@ export default function ClaudeChat() {
             </div>
           </div>
           <div className="flex gap-8">
+            {activeApp?.port && serverInfo?.ip && (
+              <a
+                href={activeApp.domain ? `https://${activeApp.domain}` : `http://${serverInfo.ip}:${activeApp.port}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-sm btn-secondary"
+                style={{ textDecoration: 'none', fontSize: 11 }}
+              >
+                <ExternalLink size={12} />
+                {activeApp.domain || `${serverInfo.ip}:${activeApp.port}`}
+              </a>
+            )}
             <button className="btn btn-sm btn-ghost" onClick={() => setShowPreview((v) => !v)} title="Preview">
               {showPreview ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
