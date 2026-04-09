@@ -201,16 +201,20 @@ function tryEnvToken() {
 }
 
 function runClaudeAuthStatus() {
-  // Order of precedence — return as soon as we find a valid token
+  // Order of precedence — return as soon as we find auth evidence.
+  // IMPORTANT: do NOT cache the short-lived accessToken from credentials.json
+  // into process.env — that would override the CLI's own token-refresh logic.
+  // Only cache long-lived tokens (from setup-token / CLAUDE_CODE_OAUTH_TOKEN).
   const env = tryEnvToken();
   if (env) {
-    // Cache to process.env so other components (claude-code spawner) see it
+    // Long-lived token from env → safe to cache
     if (env.token) process.env.CLAUDE_CODE_OAUTH_TOKEN = env.token;
     return { ok: true, ...env };
   }
   const f = tryCredentialsFile();
   if (f) {
-    if (f.token) process.env.CLAUDE_CODE_OAUTH_TOKEN = f.token;
+    // Found credentials file — don't inject the token into process.env
+    // (it's short-lived). Just confirm auth exists.
     return { ok: true, ...f };
   }
   const j = tryJsonStatus();

@@ -24,8 +24,86 @@
 const pty = require('node-pty');
 const { spawn, execSync } = require('child_process');
 const fs = require('fs');
+const path = require('path');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
+
+/**
+ * Persist a captured OAuth token to every location the system reads from:
+ *   1. /root/.claude/.credentials.json
+ *   2. /home/clawpanel/.claude/.credentials.json
+ *   3. /opt/clawpanel/backend/.env (or wherever the backend .env is)
+ *   4. process.env.CLAUDE_CODE_OAUTH_TOKEN (for immediate in-process use)
+ */
+function saveTokenEverywhere(token) {
+  if (!token) return;
+  console.log(`[auth-terminal] saving token to all credential locations`);
+
+  // 1. Set in-process env immediately
+  process.env.CLAUDE_CODE_OAUTH_TOKEN = token;
+
+  // Nested JSON format that claude reads
+  const credsJson = JSON.stringify({
+    claudeAiOauth: { accessToken: token }
+  }, null, 2);
+
+  // 2. Save to /root/.claude/.credentials.json
+  const rootDir = '/root/.claude';
+  try {
+    if (!fs.existsSync(rootDir)) fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(path.join(rootDir, '.credentials.json'), credsJson, { mode: 0o600 });
+  } catch (e) {
+    console.warn(`[auth-terminal] could not write ${rootDir}: ${e.message}`);
+  }
+
+  // 3. Save to /home/clawpanel/.claude/.credentials.json
+  const cpDir = '/home/clawpanel/.claude';
+  try {
+    if (!fs.existsSync(cpDir)) fs.mkdirSync(cpDir, { recursive: true });
+    fs.writeFileSync(path.join(cpDir, '.credentials.json'), credsJson, { mode: 0o600 });
+    // Fix ownership
+    const drop = getDropInfo();
+    if (drop.drop) {
+      const chownRec = (p) => {
+        try {
+          fs.chownSync(p, drop.uid, drop.gid);
+          if (fs.statSync(p).isDirectory()) {
+            for (const e of fs.readdirSync(p)) chownRec(path.join(p, e));
+          }
+        } catch {}
+      };
+      chownRec(cpDir);
+    }
+  } catch (e) {
+    console.warn(`[auth-terminal] could not write ${cpDir}: ${e.message}`);
+  }
+
+  // 4. Append/update in backend .env file
+  const envCandidates = [
+    path.join(__dirname, '..', '.env'),
+    '/opt/clawpanel/backend/.env',
+    '/root/clawpanel/backend/.env',
+  ];
+  for (const envFile of envCandidates) {
+    try {
+      if (!fs.existsSync(envFile)) continue;
+      let content = fs.readFileSync(envFile, 'utf8');
+      const line = `CLAUDE_CODE_OAUTH_TOKEN=${token}`;
+      if (content.includes('CLAUDE_CODE_OAUTH_TOKEN=')) {
+        // Replace existing line
+        content = content.replace(/CLAUDE_CODE_OAUTH_TOKEN=.*/g, line);
+      } else {
+        // Append
+        content = content.trimEnd() + '\n' + line + '\n';
+      }
+      fs.writeFileSync(envFile, content);
+      console.log(`[auth-terminal] saved token to ${envFile}`);
+      break; // Only write to the first .env we find
+    } catch (e) {
+      console.warn(`[auth-terminal] could not update ${envFile}: ${e.message}`);
+    }
+  }
+}
 
 /**
  * Returns { drop, uid, gid, home } when we're running as root and the
@@ -146,6 +224,9 @@ class AuthTerminalManager extends EventEmitter {
         .replace(/\x1b\][^\x07]*\x07/g, '')
         .slice(-2000);
       const lower = cleanRecent.toLowerCase();
+      // 1. Try to extract a raw token from the output
+      const tokenMatch = cleanRecent.match(/sk-ant-oat[A-Za-z0-9_-]{20,}/);
+
       if (
         !session.completed &&
         (lower.includes('long-lived authentication token created successfully') ||
@@ -155,13 +236,19 @@ class AuthTerminalManager extends EventEmitter {
          lower.includes('authentication successful') ||
          lower.includes('successfully logged in') ||
          lower.includes('token saved') ||
-         /sk-ant-oat[a-z0-9_-]+/i.test(cleanRecent))
+         lower.includes('export claude_code_oauth_token') ||
+         !!tokenMatch)
       ) {
         session.completed = true;
-        console.log('[auth-terminal] ✓ success detected from claude output');
-        // Mirror the fresh credentials to the clawpanel system user's home
-        // so the chat spawn path (running as clawpanel, not root) picks
-        // them up immediately.
+        const extractedToken = tokenMatch ? tokenMatch[0] : null;
+        console.log(`[auth-terminal] ✓ success detected (token=${extractedToken ? extractedToken.slice(0,20)+'…' : 'none in output'})`);
+
+        // 2. Persist the token to every location the system reads from
+        if (extractedToken) {
+          saveTokenEverywhere(extractedToken);
+        }
+
+        // 3. Mirror full .claude dir to clawpanel user as a fallback
         try {
           const { syncCredentialsToClawpanelUser } = require('./claude-code');
           setTimeout(() => {

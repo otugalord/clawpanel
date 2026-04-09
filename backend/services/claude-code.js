@@ -201,30 +201,41 @@ function buildEnv() {
   }
   delete env.ANTHROPIC_API_KEY;
 
-  // 2. Already-set OAuth token in env
+  // 2. Explicit CLAUDE_CODE_OAUTH_TOKEN (long-lived, from setup-token)
+  //    Either in process.env (set by saveTokenEverywhere) or in .env file
   if (env.CLAUDE_CODE_OAUTH_TOKEN && /sk-ant-oat/.test(env.CLAUDE_CODE_OAUTH_TOKEN)) {
     return env;
   }
-
-  // 3. Read from credentials file and inject
-  // Prefer the clawpanel user's own credentials file if it exists
-  const candidates = [];
-  if (info.drop) candidates.push(path.join(info.home, '.claude', '.credentials.json'));
-  candidates.push(...getCredentialFiles());
-  try {
-    for (const file of candidates) {
-      if (!fs.existsSync(file)) continue;
-      const raw = fs.readFileSync(file, 'utf8');
-      const extracted = extractTokenFromCredentialsJson(raw);
-      if (extracted && extracted.token) {
-        env.CLAUDE_CODE_OAUTH_TOKEN = extracted.token;
-        process.env.CLAUDE_CODE_OAUTH_TOKEN = extracted.token;
-        console.log(`[claude-code] using OAuth token from ${file}`);
+  const envFiles = [
+    path.join(__dirname, '..', '.env'),
+    '/opt/clawpanel/backend/.env',
+    '/root/clawpanel/backend/.env',
+  ];
+  for (const ef of envFiles) {
+    try {
+      if (!fs.existsSync(ef)) continue;
+      const raw = fs.readFileSync(ef, 'utf8');
+      const m = raw.match(/CLAUDE_CODE_OAUTH_TOKEN\s*=\s*["']?(sk-ant-oat[A-Za-z0-9_-]+)["']?/);
+      if (m) {
+        env.CLAUDE_CODE_OAUTH_TOKEN = m[1];
+        process.env.CLAUDE_CODE_OAUTH_TOKEN = m[1];
+        console.log(`[claude-code] using long-lived OAuth token from ${ef}`);
         return env;
       }
-    }
-  } catch (e) {
-    console.error('[claude-code] failed to read credentials file:', e.message);
+    } catch {}
+  }
+
+  // 3. Otherwise: let claude manage its own auth via ~/.claude/.credentials.json.
+  //    DO NOT extract the accessToken from the credentials file and inject it —
+  //    that token is short-lived and claude handles refresh internally using the
+  //    refreshToken stored in the same file. We just need HOME to point at the
+  //    directory that contains the credentials.
+  //    Verify credentials exist in the expected HOME location.
+  const credPath = path.join(env.HOME || '/root', '.claude', '.credentials.json');
+  if (fs.existsSync(credPath)) {
+    console.log(`[claude-code] using native OAuth credentials from ${credPath}`);
+  } else {
+    console.warn(`[claude-code] ⚠ no credentials found — claude may prompt for auth`);
   }
   return env;
 }
