@@ -110,22 +110,33 @@ router.post('/:id/ssl', async (req, res) => {
   const row = db.prepare('SELECT * FROM domains WHERE id=?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
 
-  // DNS pre-flight
-  const dnsCheck = await checkDns(row.domain);
-  if (!dnsCheck.ok) {
+  // DNS pre-flight: check root domain AND www separately
+  const [rootDns, wwwDns] = await Promise.all([
+    checkDns(row.domain),
+    checkDns('www.' + row.domain),
+  ]);
+
+  if (!rootDns.ok) {
     return res.status(400).json({
       ok: false,
-      error: `DNS not pointing to this server. Your domain resolves to [${dnsCheck.resolved.join(', ') || 'nothing'}] but this server is ${dnsCheck.serverIp}. Update your A record at your registrar and wait for propagation (up to 48h).`,
+      error: `DNS not pointing to this server. ${row.domain} resolves to [${rootDns.resolved.join(', ') || 'nothing'}] but this server is ${rootDns.serverIp}. Update your A record at your registrar and wait for propagation (up to 48h).`,
     });
   }
 
+  const includeWww = wwwDns.ok;
   const { email } = req.body || {};
   const logs = [];
-  const ok = await certbot.installSSL(row.domain, email, (chunk) => {
+  const logCb = (chunk) => {
     logs.push(chunk);
     const broadcast = req.app.get('wsBroadcast');
     if (broadcast) broadcast({ type: 'ssl_log', domain: row.domain, data: chunk });
-  });
+  };
+
+  if (!includeWww) {
+    logCb(`Note: www.${row.domain} does not point to this server — requesting SSL for ${row.domain} only.\n`);
+  }
+
+  const ok = await certbot.installSSL(row.domain, email, logCb, { includeWww });
   if (ok) db.prepare('UPDATE domains SET ssl_enabled=1 WHERE id=?').run(row.id);
   res.json({ ok, log: logs.join('') });
 });
