@@ -32,6 +32,25 @@ function uuidv4() {
   return crypto.randomUUID();
 }
 
+/**
+ * Strip ANSI escape sequences and terminal control codes so they don't
+ * appear as □[?25h garbage in the chat UI.
+ */
+function stripAnsi(s) {
+  if (!s) return s;
+  return String(s)
+    // CSI sequences (colors, cursor, erase): \x1b[...X
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    // OSC sequences: \x1b]...\x07 or \x1b]...\x1b\\
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    // Character-set selection: \x1b(B, \x1b)0 etc
+    .replace(/\x1b[()][A-Z0-9]/g, '')
+    // DEC private-mode single chars: \x1b=, \x1b>
+    .replace(/\x1b[=>]/g, '')
+    // Stray single ESC and BEL
+    .replace(/[\x1b\x07]/g, '');
+}
+
 function getSession(projectId) {
   return sessions.get(projectId) || null;
 }
@@ -149,9 +168,10 @@ function sendMessage(projectId, cwd, message) {
 
   const isFirst = !s.hasFirstMessage;
   // Use --session-id for the first message, --resume for subsequent ones.
-  // --dangerously-skip-permissions lets claude write/execute freely; safe
-  // because we already require admin auth on the panel and run in IS_SANDBOX.
-  const args = ['--print', '--dangerously-skip-permissions'];
+  // No --dangerously-skip-permissions: it's rejected when running as root
+  // even with IS_SANDBOX=1. --print mode auto-skips the trust dialog so
+  // we don't need it.
+  const args = ['--print'];
   if (isFirst) {
     args.push('--session-id', s.sessionId);
   } else {
@@ -167,13 +187,15 @@ function sendMessage(projectId, cwd, message) {
 
   let stderrBuf = '';
   child.stdout.on('data', (data) => {
-    _emit(s, projectId, { type: 'claude_output', projectId, data: data.toString() });
+    const clean = stripAnsi(data.toString());
+    if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
   });
   child.stderr.on('data', (data) => {
     const text = data.toString();
     stderrBuf += text;
     // Forward stderr too — the user can see errors live
-    _emit(s, projectId, { type: 'claude_output', projectId, data: text });
+    const clean = stripAnsi(text);
+    if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
   });
   child.on('error', (err) => {
     _emit(s, projectId, {
