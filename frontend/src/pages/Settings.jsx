@@ -160,7 +160,8 @@ export default function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authTermActive, authTermSessionId]);
 
-  // Manual code submit — sends the code + Enter via the WS to claude's stdin
+  // Manual code submit — sends the code + Enter via the WS to claude's stdin,
+  // then starts an aggressive 2-second poll for up to 30 seconds.
   const submitManualCode = () => {
     const code = manualCode.trim();
     if (!code) return;
@@ -174,7 +175,41 @@ export default function Settings() {
       data: code + '\r',
     });
     setManualCode('');
-    toast.success('Code submitted');
+    toast.success('Code submitted — checking authentication…');
+
+    // Kill any existing slow poll and start an aggressive 2-second one
+    if (pollRef.current) clearInterval(pollRef.current);
+    setLoginPolling(true);
+    let attempts = 0;
+    const maxAttempts = 15; // 15 × 2s = 30s
+
+    const poll = async () => {
+      attempts++;
+      const s = await loadClaudeStatus();
+      if (isNewAuth(s)) {
+        // Success
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        setLoginPolling(false);
+        toast.success('Claude connected ✓');
+        closeAuthTerminal();
+        // Clear the "show form" flag so the connected card appears clean
+        setClaudeStatus((prev) => ({ ...prev, _showForm: false }));
+        return;
+      }
+      if (attempts >= maxAttempts) {
+        // Timeout
+        clearInterval(pollRef.current);
+        pollRef.current = null;
+        setLoginPolling(false);
+        toast.error('Authentication failed after 30 seconds. Please try again.');
+      }
+    };
+
+    // Check once immediately after 1 second
+    setTimeout(poll, 1000);
+    // Then every 2 seconds
+    pollRef.current = setInterval(poll, 2000);
   };
 
   const hasApiKeySaved =
@@ -366,7 +401,27 @@ export default function Settings() {
             </button>
           </div>
 
-          {/* Tabs */}
+          {/* When connected: show only a minimal "switch account" link, no tabs */}
+          {isConnected && !authTermActive && (
+            <div style={{ padding: '14px 24px', textAlign: 'center' }}>
+              <button
+                className="btn btn-sm btn-ghost"
+                onClick={() => {
+                  // Force baseline to "was authenticated" so the user can re-auth
+                  baselineRef.current = { authenticated: true, authMethod: claudeStatus?.authMethod, email: claudeStatus?.email };
+                  setAuthTermActive(false);
+                  // Show the tabs by temporarily marking as disconnected
+                  setClaudeStatus((prev) => ({ ...prev, _showForm: true }));
+                }}
+                style={{ fontSize: 11 }}
+              >
+                Switch account or re-authenticate →
+              </button>
+            </div>
+          )}
+
+          {/* Tabs + content — only shown when NOT connected (or user clicked switch) */}
+          {(!isConnected || claudeStatus?._showForm || authTermActive) && (<>
           <div style={{ display: 'flex', borderBottom: '1px solid var(--border)' }}>
             <button
               onClick={() => setAuthTab('oauth')}
@@ -621,6 +676,7 @@ export default function Settings() {
               </div>
             )}
           </div>
+          </>)}
         </div>
 
         {/* ═══ Apps Directory ═══ */}
