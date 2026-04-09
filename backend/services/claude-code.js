@@ -55,53 +55,81 @@ function getClawpanelUser() {
 }
 
 /**
- * Ensure the clawpanel user has a copy of the current credentials file.
- * Called lazily before spawning so any credentials that landed in /root/.claude
- * (e.g. from a previous auth flow) are mirrored to /home/clawpanel/.claude.
+ * Recursively mirror /root/.claude/ (or any found claude dir) into
+ * /home/clawpanel/.claude/. Preserves full content (credentials, trust
+ * markers, projects, sessions, mcp cache) so claude running as the
+ * clawpanel user sees exactly the same state.
+ *
+ * Also mirrors /root/.claude.json → /home/clawpanel/.claude.json (the
+ * file that holds workspace trust + bypassPermissionsModeAccepted).
  */
 function syncCredentialsToClawpanelUser() {
   const info = getClawpanelUser();
   if (!info.drop) return; // Not running as root, nothing to sync
-  const targetDir = path.join(info.home, '.claude');
-  const targetFile = path.join(targetDir, '.credentials.json');
-  try {
-    // Find the newest source credentials file
-    let sourceFile = null;
-    let sourceMtime = 0;
-    for (const f of getCredentialFiles()) {
-      if (f === targetFile) continue;
-      try {
-        if (fs.existsSync(f)) {
-          const st = fs.statSync(f);
-          if (st.mtimeMs > sourceMtime) {
-            sourceFile = f;
-            sourceMtime = st.mtimeMs;
-          }
-        }
-      } catch {}
-    }
-    if (!sourceFile) return;
-    // Target older than source → copy
-    let copy = true;
+
+  const target = path.join(info.home, '.claude');
+
+  // Find the most recent valid source dir (the one containing a
+  // credentials file with a real sk-ant-oat token or nested claudeAiOauth)
+  let sourceDir = null;
+  let sourceMtime = 0;
+  const candidates = [
+    path.join('/root', '.claude'),
+    path.join(process.env.HOME || '/root', '.claude'),
+  ];
+  for (const dir of candidates) {
+    if (dir === target) continue;
     try {
-      if (fs.existsSync(targetFile)) {
-        const tst = fs.statSync(targetFile);
-        if (tst.mtimeMs >= sourceMtime) copy = false;
+      if (!fs.existsSync(dir)) continue;
+      const credFile = path.join(dir, '.credentials.json');
+      if (!fs.existsSync(credFile)) continue;
+      const st = fs.statSync(credFile);
+      if (st.mtimeMs > sourceMtime) {
+        sourceDir = dir;
+        sourceMtime = st.mtimeMs;
       }
     } catch {}
-    if (!copy) return;
-    if (!fs.existsSync(targetDir)) {
-      fs.mkdirSync(targetDir, { recursive: true });
-    }
-    fs.copyFileSync(sourceFile, targetFile);
-    try {
-      fs.chownSync(targetDir, info.uid, info.gid);
-      fs.chownSync(targetFile, info.uid, info.gid);
-    } catch {}
-    console.log(`[claude-code] synced credentials ${sourceFile} → ${targetFile}`);
-  } catch (e) {
-    console.error('[claude-code] syncCredentialsToClawpanelUser failed:', e.message);
   }
+  if (!sourceDir) return;
+
+  // Skip if target already has equal or newer credentials
+  try {
+    const targetCred = path.join(target, '.credentials.json');
+    if (fs.existsSync(targetCred)) {
+      const tst = fs.statSync(targetCred);
+      if (tst.mtimeMs >= sourceMtime) return;
+    }
+  } catch {}
+
+  try {
+    // Recursive copy (Node 16+)
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+    fs.cpSync(sourceDir, target, { recursive: true, force: true });
+    // chown entire tree to clawpanel
+    const chownRec = (p) => {
+      try {
+        fs.chownSync(p, info.uid, info.gid);
+        const st = fs.statSync(p);
+        if (st.isDirectory()) {
+          for (const entry of fs.readdirSync(p)) chownRec(path.join(p, entry));
+        }
+      } catch {}
+    };
+    chownRec(target);
+    console.log(`[claude-code] synced ${sourceDir} → ${target} (recursive)`);
+  } catch (e) {
+    console.error('[claude-code] sync .claude dir failed:', e.message);
+  }
+
+  // Also mirror the .claude.json trust file
+  try {
+    const srcTrust = path.join(path.dirname(sourceDir), '.claude.json');
+    const dstTrust = path.join(info.home, '.claude.json');
+    if (fs.existsSync(srcTrust)) {
+      fs.copyFileSync(srcTrust, dstTrust);
+      try { fs.chownSync(dstTrust, info.uid, info.gid); } catch {}
+    }
+  } catch {}
 }
 
 
@@ -285,9 +313,12 @@ function sendMessage(projectId, cwd, message) {
 
   const isFirst = !s.hasFirstMessage;
   // Use --session-id for the first message, --resume for subsequent ones.
-  // --dangerously-skip-permissions is safe to pass now that we drop to a
-  // dedicated non-root user (claude only refuses it as root).
-  const args = ['--print', '--dangerously-skip-permissions'];
+  // IMPORTANT: claude --print mode does NOT require
+  // --dangerously-skip-permissions — permission prompts don't apply to
+  // the non-interactive print flow. That flag is only rejected when
+  // running as root interactively. Keeping the invocation minimal makes
+  // it work reliably whether we drop privileges or not.
+  const args = ['--print'];
   if (isFirst) {
     args.push('--session-id', s.sessionId);
   } else {
@@ -297,9 +328,18 @@ function sendMessage(projectId, cwd, message) {
 
   console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst} drop=${info.drop}`);
   const spawnOpts = { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] };
+  // Drop privileges if possible AND the clawpanel home has credentials.
+  // Otherwise stay as root — --print mode works either way.
   if (info.drop) {
-    spawnOpts.uid = info.uid;
-    spawnOpts.gid = info.gid;
+    const clawpanelCred = path.join(info.home, '.claude', '.credentials.json');
+    if (fs.existsSync(clawpanelCred)) {
+      spawnOpts.uid = info.uid;
+      spawnOpts.gid = info.gid;
+    } else {
+      console.warn('[claude-code] clawpanel creds missing, falling back to root');
+      // Re-point HOME at root since we're no longer dropping
+      env.HOME = '/root';
+    }
   }
   const child = spawn('claude', args, spawnOpts);
   s.current = child;

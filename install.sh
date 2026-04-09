@@ -94,12 +94,13 @@ if [[ ! -f /etc/sudoers.d/clawpanel ]]; then
   ok "sudoers.d entry added for clawpanel"
 fi
 
-# Mirror root's claude credentials to the clawpanel user so it can run
-# claude without re-authenticating.
+# Mirror root's claude state (credentials + trust + projects + sessions) to
+# the clawpanel user so it can run claude without re-authenticating.
 mkdir -p /home/clawpanel/.claude
-if [[ -f /root/.claude/.credentials.json ]]; then
-  cp /root/.claude/.credentials.json /home/clawpanel/.claude/.credentials.json
-  ok "credentials copied to /home/clawpanel/.claude/"
+if [[ -d /root/.claude ]]; then
+  # Copy entire directory tree (credentials, projects, sessions, mcp cache, ...)
+  cp -r /root/.claude/. /home/clawpanel/.claude/ 2>/dev/null || true
+  ok "mirrored /root/.claude → /home/clawpanel/.claude"
 fi
 if [[ -f /root/.claude.json ]]; then
   cp /root/.claude.json /home/clawpanel/.claude.json
@@ -107,7 +108,7 @@ if [[ -f /root/.claude.json ]]; then
 fi
 chown -R clawpanel:clawpanel /home/clawpanel/.claude /home/clawpanel/.claude.json 2>/dev/null || true
 chmod 700 /home/clawpanel/.claude 2>/dev/null || true
-chmod 600 /home/clawpanel/.claude/.credentials.json 2>/dev/null || true
+find /home/clawpanel/.claude -name '.credentials.json' -exec chmod 600 {} \; 2>/dev/null || true
 
 # Apps directory must be readable by the clawpanel user
 mkdir -p /root/apps

@@ -22,9 +22,40 @@
  *     for this and broadcasts the current claude auth status.
  */
 const pty = require('node-pty');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
+const fs = require('fs');
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
+
+/**
+ * Returns { drop, uid, gid, home } when we're running as root and the
+ * `clawpanel` user exists. In that case claude setup-token will be spawned
+ * AS that user so credentials land directly in /home/clawpanel/.claude/.
+ */
+let _cachedDropInfo = null;
+function getDropInfo() {
+  if (_cachedDropInfo !== null) return _cachedDropInfo;
+  if (process.getuid && process.getuid() !== 0) {
+    _cachedDropInfo = { drop: false };
+    return _cachedDropInfo;
+  }
+  try {
+    const uid = parseInt(execSync('id -u clawpanel 2>/dev/null').toString().trim(), 10);
+    const gid = parseInt(execSync('id -g clawpanel 2>/dev/null').toString().trim(), 10);
+    if (!Number.isNaN(uid) && !Number.isNaN(gid)) {
+      // Make sure /home/clawpanel/.claude exists with right ownership
+      const claudeDir = '/home/clawpanel/.claude';
+      if (!fs.existsSync(claudeDir)) {
+        try { fs.mkdirSync(claudeDir, { recursive: true }); } catch {}
+      }
+      try { fs.chownSync(claudeDir, uid, gid); } catch {}
+      _cachedDropInfo = { drop: true, uid, gid, home: '/home/clawpanel' };
+      return _cachedDropInfo;
+    }
+  } catch {}
+  _cachedDropInfo = { drop: false };
+  return _cachedDropInfo;
+}
 
 const WAITING_TTL_MS = 10 * 60 * 1000; // 10 minutes in waiting_for_code
 const MAX_SPAWN_MS = 2 * 60 * 1000;    // kill a hung PTY after 2 min
@@ -52,17 +83,34 @@ class AuthTerminalManager extends EventEmitter {
     //    the user to paste the code via stdin
     //  - auth login prints the URL then sits silently with no input prompt
     //  - setup-token validates the code immediately and reports success/error
+    //
+    // CRITICAL: when running as root, we drop privileges to the `clawpanel`
+    // user so the resulting credentials land in /home/clawpanel/.claude/
+    // — which is where `claude-code.js` will later look when spawning the
+    // chat PTY (also as the clawpanel user).
+    const drop = getDropInfo();
+    const spawnCwd = drop.drop ? drop.home : (process.env.HOME || '/root');
+    const spawnEnv = { ...env };
+    if (drop.drop) {
+      spawnEnv.HOME = drop.home;
+      spawnEnv.USER = 'clawpanel';
+      spawnEnv.LOGNAME = 'clawpanel';
+    }
+    const ptyOpts = {
+      name: 'xterm-256color',
+      cols: 200,
+      rows: 30,
+      cwd: spawnCwd,
+      env: spawnEnv,
+    };
+    if (drop.drop) {
+      ptyOpts.uid = drop.uid;
+      ptyOpts.gid = drop.gid;
+    }
     let p;
     try {
-      // Wide PTY (200 cols) so the long OAuth URL prints on a single line.
-      // The WebLinksAddon in xterm.js can only detect URLs that aren't wrapped.
-      p = pty.spawn('claude', ['setup-token'], {
-        name: 'xterm-256color',
-        cols: 200,
-        rows: 30,
-        cwd: process.env.HOME || '/root',
-        env,
-      });
+      p = pty.spawn('claude', ['setup-token'], ptyOpts);
+      console.log(`[auth-terminal] spawned setup-token drop=${drop.drop} uid=${drop.uid || 'self'}`);
     } catch (e) {
       return { error: 'Failed to spawn claude: ' + e.message };
     }
