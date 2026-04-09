@@ -16,7 +16,21 @@ function openPort(port) {
 }
 
 function slugify(name) {
-  return String(name || '').toLowerCase().trim().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'app';
+  return String(name || '').toLowerCase().trim().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50) || 'app';
+}
+
+function validateAppName(name) {
+  if (!name || typeof name !== 'string') return 'Name is required';
+  if (name.length > 50) return 'Name must be under 50 characters';
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*$/.test(name.trim())) return 'Name must be alphanumeric (dashes allowed)';
+  return null;
+}
+
+function validatePort(port) {
+  if (port === undefined || port === null || port === '') return null; // auto-assign
+  const p = parseInt(port, 10);
+  if (Number.isNaN(p) || p < 1024 || p > 65535) return 'Port must be between 1024 and 65535';
+  return null;
 }
 
 async function portInUse(port) {
@@ -71,9 +85,13 @@ router.get('/', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const { name, port: portRaw, script } = req.body || {};
+    const nameErr = validateAppName(name);
+    if (nameErr) return res.status(400).json({ error: nameErr });
+    const portErr = validatePort(portRaw);
+    if (portErr) return res.status(400).json({ error: portErr });
     const slug = slugify(name);
-    if (!slug) return res.status(400).json({ error: 'Nome inválido' });
-    if (db.prepare('SELECT 1 FROM apps WHERE name=?').get(slug)) return res.status(409).json({ error: 'Nome já existe' });
+    if (!slug) return res.status(400).json({ error: 'Invalid name' });
+    if (db.prepare('SELECT 1 FROM apps WHERE name=?').get(slug)) return res.status(409).json({ error: 'An app with this name already exists' });
     const appsDir = getSetting('apps_dir', '/root/apps');
     const folder = path.join(appsDir, slug);
     if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
@@ -143,17 +161,31 @@ router.post('/:id/start', async (req, res) => {
   const env = JSON.parse(app.env_vars || '{}');
   if (app.port) env.PORT = String(app.port);
   try {
-    // Detect script: prefer explicit script; else package.json start; else index.js
+    // Detect script: DB field → package.json → common entry files
     let script = app.script || '';
     if (!script) {
       const pkgPath = path.join(app.folder, 'package.json');
       if (fs.existsSync(pkgPath)) {
-        script = 'npm';
-      } else if (fs.existsSync(path.join(app.folder, 'index.js'))) {
-        script = 'index.js';
-      } else {
-        return res.status(400).json({ error: 'Nada para iniciar. Define script ou cria index.js / package.json' });
+        try {
+          const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+          if (pkg.scripts && pkg.scripts.start) script = 'npm';
+          else if (pkg.main && fs.existsSync(path.join(app.folder, pkg.main))) script = pkg.main;
+          else script = 'npm'; // fallback to npm start
+        } catch { script = 'npm'; }
       }
+      if (!script) {
+        const candidates = ['index.js', 'server.js', 'app.js', 'main.js', 'index.mjs', 'src/index.js'];
+        for (const c of candidates) {
+          if (fs.existsSync(path.join(app.folder, c))) { script = c; break; }
+        }
+      }
+      if (!script) {
+        return res.status(400).json({
+          error: 'No entry point found. Ask Claude to create one, or set the script field manually in the app settings.',
+        });
+      }
+      // Save discovered script to DB for next time
+      db.prepare('UPDATE apps SET script=? WHERE id=?').run(script, app.id);
     }
     const opts = {
       name: app.name,

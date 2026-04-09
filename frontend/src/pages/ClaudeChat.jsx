@@ -42,6 +42,8 @@ export default function ClaudeChat() {
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
 
+  const [authError, setAuthError] = useState(false);
+
   // Detect CLI issues from stream content
   const detectCliError = useCallback((text) => {
     if (!text) return false;
@@ -52,6 +54,19 @@ export default function ClaudeChat() {
       lower.includes('command not found') ||
       lower.includes('enoent') ||
       lower.includes('claude: not found')
+    );
+  }, []);
+
+  // Detect auth errors in claude output
+  const detectAuthError = useCallback((text) => {
+    if (!text) return false;
+    const lower = text.toLowerCase();
+    return (
+      lower.includes('not logged in') ||
+      lower.includes('please run /login') ||
+      lower.includes('please log in') ||
+      lower.includes('authentication_error') ||
+      lower.includes('invalid authentication')
     );
   }, []);
 
@@ -71,6 +86,12 @@ export default function ClaudeChat() {
 
   const onWsMessage = useCallback((msg) => {
     if (msg.type === 'claude_output' && msg.projectId === projectId) {
+      // Detect auth errors and suppress the raw message
+      if (detectAuthError(msg.data)) {
+        setAuthError(true);
+        setStreaming(false);
+        return;
+      }
       setStreaming(true);
       setStreamBuffer((b) => {
         const next = (b + msg.data).slice(-50000);
@@ -238,7 +259,29 @@ export default function ClaudeChat() {
         </div>
 
         <div className="chat-messages" ref={scrollRef}>
-          {claudeCliError && (
+          {authError && (
+            <div style={{
+              maxWidth: 460,
+              margin: '40px auto',
+              textAlign: 'center',
+              padding: '40px 32px',
+              background: 'var(--card)',
+              border: '1px solid rgba(251,191,36,.3)',
+              borderRadius: 14,
+            }}>
+              <div style={{ fontSize: 40, marginBottom: 14 }}>🔑</div>
+              <h3 style={{ fontSize: 17, fontWeight: 800, marginBottom: 8 }}>
+                Claude is not signed in
+              </h3>
+              <p style={{ fontSize: 13, color: 'var(--text-dim)', lineHeight: 1.6, marginBottom: 22 }}>
+                Go to Settings and sign in with your Anthropic account to start chatting.
+              </p>
+              <button className="btn btn-lg" onClick={() => navigate('/settings')}>
+                <SettingsIcon size={15} /> Go to Settings →
+              </button>
+            </div>
+          )}
+          {!authError && claudeCliError && (
             <div style={{
               maxWidth: 460,
               margin: '40px auto',

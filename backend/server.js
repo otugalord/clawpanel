@@ -11,12 +11,14 @@ const { WebSocketServer } = require('ws');
 require('dotenv').config();
 
 const { db } = require('./db/database');
+const { runMigrations } = require('./db/migrations');
+try { runMigrations(); } catch (e) { console.error('[startup] migrations failed:', e.message); }
 const { router: authRouter, authMiddleware, verifyJwtToken } = require('./routes/auth');
 const appsRouter = require('./routes/apps');
 const domainsRouter = require('./routes/domains');
 const claudeRouter = require('./routes/claude');
 const terminalRouter = require('./routes/terminal');
-const { router: systemRouter, getStats, checkClaudeStatus } = require('./routes/system');
+const { router: systemRouter, getStats, checkClaudeStatus, getServerIp } = require('./routes/system');
 const claudeSvc = require('./services/claude-code');
 const { terminalManager } = require('./services/terminal-manager');
 const { authTerminal } = require('./services/auth-terminal');
@@ -49,8 +51,16 @@ app.use((req, res, next) => {
   }
   next();
 });
+app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+// ─── Rate limiting ───────────────────────────────────────────────────────
+const rateLimit = require('express-rate-limit');
+const generalLimit = rateLimit({ windowMs: 60_000, max: 200, standardHeaders: true, legacyHeaders: false });
+const claudeLimit = rateLimit({ windowMs: 3600_000, max: 100, message: { error: 'Claude chat rate limit reached. Try again later.' } });
+const appCreateLimit = rateLimit({ windowMs: 3600_000, max: 10, message: { error: 'App creation rate limit reached.' } });
+app.use('/api/', generalLimit);
 
 app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.1.0' }));
 
@@ -58,6 +68,7 @@ app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.1.0' }));
 app.use('/api/auth', authRouter);
 
 // Protected API
+app.post('/api/apps', authMiddleware, appCreateLimit);
 app.use('/api/apps', authMiddleware, appsRouter);
 app.use('/api/domains', authMiddleware, domainsRouter);
 app.use('/api/claude', authMiddleware, claudeRouter);
@@ -78,7 +89,28 @@ if (fs.existsSync(FRONTEND_DIST)) {
 }
 
 // ─── WEBSOCKET ────────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  verifyClient: ({ req }, done) => {
+    // Allow same-host, localhost, direct IP, and when no origin (non-browser)
+    const origin = req.headers.origin || '';
+    if (!origin) return done(true); // CLI / non-browser clients
+    try {
+      const u = new URL(origin);
+      const host = req.headers.host || '';
+      const allowed = [
+        host.split(':')[0],
+        'localhost',
+        '127.0.0.1',
+        getServerIp(),
+      ];
+      if (allowed.includes(u.hostname)) return done(true);
+    } catch {}
+    console.warn(`[ws] rejected origin: ${origin}`);
+    done(false, 403, 'Origin not allowed');
+  },
+});
 const statsSubs = new Set();
 const logSubs = new Map(); // appName -> Set<ws>
 
@@ -293,7 +325,7 @@ setInterval(async () => {
     if (ws.readyState === 1) ws.send(payload);
     else statsSubs.delete(ws);
   }
-}, 10000);
+}, 15000);
 
 // ─── PM2 log tailing via bus ──────────────────────────────────────────────
 const logTailsStarted = new Set();

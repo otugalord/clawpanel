@@ -314,13 +314,31 @@ async function getStats() {
   }
 }
 
-// GET /api/system/stats
+// ─── Stats with 5-second cache ────────────────────────────────────────────
+let _statsCache = null;
+let _statsCacheTime = 0;
+const STATS_TTL = 5000; // 5 seconds
+
 router.get('/stats', async (req, res) => {
-  res.json(await getStats());
+  const now = Date.now();
+  if (_statsCache && now - _statsCacheTime < STATS_TTL) {
+    return res.json(_statsCache);
+  }
+  _statsCache = await getStats();
+  _statsCacheTime = now;
+  res.json(_statsCache);
 });
 
-// GET /api/system/claude-status
+// GET /api/system/claude-status — always fresh, no cache
 router.get('/claude-status', (req, res) => {
+  // Clear any stale env token that might have been cached from a deleted credentials file
+  const home = process.env.HOME || '/root';
+  const credPath = path.join(home, '.claude', '.credentials.json');
+  if (!fsLib.existsSync(credPath) && process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    // Token in env but no creds file → might be stale
+    // Don't clear it outright (could be a long-lived setup-token), but
+    // flag the status so the frontend knows
+  }
   res.json(checkClaudeStatus());
 });
 
@@ -431,6 +449,21 @@ router.put('/settings', (req, res) => {
     setSetting(k, v);
   }
   res.json({ ok: true });
+});
+
+// GET /api/system/logs — last 100 lines of the log file
+router.get('/logs', (req, res) => {
+  try {
+    const logDir = process.env.CLAWPANEL_LOG_DIR || path.join(__dirname, '..', 'logs');
+    const today = new Date().toISOString().slice(0, 10);
+    const logFile = path.join(logDir, `clawpanel-${today}.log`);
+    if (!fsLib.existsSync(logFile)) return res.json({ lines: [] });
+    const content = fsLib.readFileSync(logFile, 'utf8');
+    const lines = content.split('\n').filter(Boolean).slice(-100);
+    res.json({ lines });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // GET /api/system/info — public IP, hostname, OS
