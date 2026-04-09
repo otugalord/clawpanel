@@ -46,7 +46,7 @@ export default function Sidebar({ user }) {
   return (
     <aside className="sidebar">
       <div className="sidebar-logo">
-        <div className="logo-icon">C</div>
+        <div className="logo-icon">🦀</div>
         ClawPanel
       </div>
       <nav className="sidebar-nav">

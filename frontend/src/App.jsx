@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import Topbar from './components/Topbar';
+import { HelpButton, WelcomeModal } from './components/HelpPanel';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import AppManager from './pages/AppManager';
@@ -46,8 +47,17 @@ export default function App() {
     );
   }
 
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('cp_welcomed'));
+
   return (
     <div className="app">
+      {showWelcome && (
+        <WelcomeModal onClose={() => {
+          setShowWelcome(false);
+          localStorage.setItem('cp_welcomed', '1');
+        }} />
+      )}
+      <HelpButton />
       <Sidebar user={user} />
       <div className="main">
         <Topbar />

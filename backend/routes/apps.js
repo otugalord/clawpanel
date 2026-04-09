@@ -180,8 +180,24 @@ router.post('/:id/start', async (req, res) => {
         }
       }
       if (!script) {
+        // Last resort: find any .js file in the folder (excluding node_modules)
+        try {
+          const found = execSync(
+            `find "${app.folder}" -maxdepth 3 -name "*.js" -not -path "*/node_modules/*" | head -1`,
+            { encoding: 'utf8', timeout: 3000 }
+          ).trim();
+          if (found) {
+            script = path.relative(app.folder, found);
+          }
+        } catch {}
+      }
+      if (!script) {
+        // Check for Python files
+        const hasPython = fs.readdirSync(app.folder).some(f => f.endsWith('.py'));
         return res.status(400).json({
-          error: 'No entry point found. Ask Claude to create one, or set the script field manually in the app settings.',
+          error: hasPython
+            ? 'Python files found but PM2 needs a JS entry point. Ask Claude to add a package.json with a start script.'
+            : 'No entry point found. Ask Claude to create one, or set the script field manually.',
         });
       }
       // Save discovered script to DB for next time

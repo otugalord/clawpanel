@@ -41,7 +41,7 @@ export default function Login({ onAuth }) {
     <div className="auth-wrap">
       <form className="auth-box" onSubmit={submit}>
         <h1>
-          <span className="logo-icon">C</span>
+          <span className="logo-icon">🦀</span>
           ClawPanel
         </h1>
         <p>

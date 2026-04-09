@@ -1,17 +1,17 @@
 :root {
-  --bg: #0d0e1a;
-  --bg2: #0f1021;
-  --card: #111224;
-  --card2: #171831;
-  --border: #1e2035;
-  --border2: #2a2c4a;
-  --accent: #6c63ff;
-  --accent-hover: #5b52e8;
-  --accent-glow: rgba(108, 99, 255, 0.25);
-  --active: #1a237e;
-  --text: #f5f6fa;
-  --text-dim: #8b92a5;
-  --text-muted: #5a6078;
+  --bg: #0F1923;
+  --bg2: #0A1628;
+  --card: #162030;
+  --card2: #1C2A3E;
+  --border: #1E3048;
+  --border2: #2A4060;
+  --accent: #FF6B00;
+  --accent-hover: #E05E00;
+  --accent-glow: rgba(255, 107, 0, 0.2);
+  --active: #1A3A5C;
+  --text: #E8ECF1;
+  --text-dim: #8899AA;
+  --text-muted: #5A6E82;
   --green: #4ade80;
   --yellow: #fbbf24;
   --red: #f87171;
@@ -116,7 +116,7 @@ input, textarea, select {
 /* ───── SIDEBAR ───── */
 .sidebar {
   width: 220px;
-  background: var(--card);
+  background: #0D1F33;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -173,9 +173,10 @@ input, textarea, select {
 }
 
 .sidebar-item.active {
-  background: var(--accent-glow);
+  background: rgba(255, 107, 0, 0.12);
   color: var(--accent);
   font-weight: 600;
+  border-left: 3px solid var(--accent);
 }
 
 .sidebar-section {
@@ -305,6 +306,7 @@ input, textarea, select {
 .badge-yellow { background: rgba(251, 191, 36, 0.12); color: var(--yellow); border: 1px solid rgba(251, 191, 36, 0.25); }
 .badge-gray { background: rgba(139, 146, 165, 0.12); color: var(--text-dim); border: 1px solid rgba(139, 146, 165, 0.2); }
 .badge-blue { background: rgba(96, 165, 250, 0.12); color: var(--blue); border: 1px solid rgba(96, 165, 250, 0.25); }
+.badge-orange { background: rgba(255, 107, 0, 0.12); color: var(--accent); border: 1px solid rgba(255, 107, 0, 0.25); }
 
 /* ───── PAGE HEADER ───── */
 .page-header {
@@ -559,7 +561,7 @@ input, textarea, select {
 }
 .chat-msg.user {
   align-self: flex-end;
-  background: var(--accent);
+  background: linear-gradient(135deg, #FF6B00, #E05E00);
   color: #fff;
   border-bottom-right-radius: 4px;
 }
