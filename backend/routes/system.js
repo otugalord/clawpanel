@@ -492,6 +492,58 @@ router.get('/info', async (req, res) => {
   }
 });
 
+// GET /api/system/version — check for updates
+router.get('/version', (req, res) => {
+  const pkgPath = path.join(__dirname, '..', 'package.json');
+  let current = '0.2.0';
+  try { current = JSON.parse(fsLib.readFileSync(pkgPath, 'utf8')).version; } catch {}
+  let commitsBehind = 0;
+  let hasUpdate = false;
+  try {
+    const installDir = path.join(__dirname, '..', '..');
+    execSync('git fetch origin main --quiet 2>/dev/null', { cwd: installDir, timeout: 15000, stdio: 'ignore' });
+    const count = execSync('git rev-list HEAD..origin/main --count 2>/dev/null', {
+      cwd: installDir, encoding: 'utf8', timeout: 5000,
+    }).trim();
+    commitsBehind = parseInt(count, 10) || 0;
+    hasUpdate = commitsBehind > 0;
+  } catch {}
+  res.json({ current, hasUpdate, commitsBehind });
+});
+
+// POST /api/system/update — pull + rebuild + restart
+router.post('/update', async (req, res) => {
+  const broadcast = req.app.get('wsBroadcast');
+  const log = (msg) => {
+    if (broadcast) broadcast({ type: 'update_log', data: msg + '\n' });
+  };
+  const installDir = path.join(__dirname, '..', '..');
+  try {
+    log('$ git pull origin main');
+    const pull = execSync('git pull origin main 2>&1', { cwd: installDir, encoding: 'utf8', timeout: 30000 });
+    log(pull);
+    log('$ cd frontend && npm install');
+    const npmI = execSync('cd frontend && npm install --no-audit --no-fund 2>&1', { cwd: installDir, encoding: 'utf8', timeout: 120000 });
+    log(npmI.slice(-400));
+    log('$ cd frontend && npm run build');
+    const build = execSync('cd frontend && npm run build 2>&1', { cwd: installDir, encoding: 'utf8', timeout: 120000 });
+    log(build.slice(-400));
+    log('$ cd backend && npm install');
+    const bI = execSync('cd backend && npm install --omit=dev --no-audit --no-fund 2>&1', { cwd: installDir, encoding: 'utf8', timeout: 120000 });
+    log(bI.slice(-400));
+    log('\n✓ Update complete. Restarting in 3 seconds...');
+    res.json({ ok: true });
+    // Restart PM2 after a short delay so the response has time to send
+    setTimeout(() => {
+      try { execSync('pm2 restart clawpanel', { timeout: 10000 }); } catch {}
+    }, 3000);
+  } catch (e) {
+    const msg = e.stdout?.toString() || e.stderr?.toString() || e.message;
+    log('✗ Update failed: ' + msg.slice(-500));
+    res.status(500).json({ ok: false, error: msg.slice(-500) });
+  }
+});
+
 module.exports = {
   router,
   getStats,

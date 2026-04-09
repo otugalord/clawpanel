@@ -62,7 +62,7 @@ const claudeLimit = rateLimit({ windowMs: 3600_000, max: 100, message: { error: 
 const appCreateLimit = rateLimit({ windowMs: 3600_000, max: 10, message: { error: 'App creation rate limit reached.' } });
 app.use('/api/', generalLimit);
 
-app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.1.0' }));
+app.get('/api/health', (req, res) => res.json({ ok: true, version: '0.2.0' }));
 
 // Public auth routes
 app.use('/api/auth', authRouter);

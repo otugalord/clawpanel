@@ -15,7 +15,7 @@ db.exec(schema);
 const defaults = {
   apps_dir: '/root/apps',
   theme: 'dark',
-  version: '0.1.0',
+  version: '0.2.0',
 };
 const setStmt = db.prepare('INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)');
 for (const [k, v] of Object.entries(defaults)) setStmt.run(k, v);

@@ -14,6 +14,12 @@ export default function Settings() {
   const [revealedKey, setRevealedKey] = useState(null);
   const [passwords, setPasswords] = useState({ old: '', new: '', confirm: '' });
 
+  // Version / update state
+  const [versionInfo, setVersionInfo] = useState(null);
+  const [checkingVersion, setCheckingVersion] = useState(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateLogs, setUpdateLogs] = useState([]);
+
   // Claude auth state
   const [claudeStatus, setClaudeStatus] = useState(null);
   const [authTab, setAuthTab] = useState('oauth'); // 'oauth' | 'api_key'
@@ -125,6 +131,8 @@ export default function Settings() {
         toast.error('Auth session timed out — click Sign in again');
         closeAuthTerminal();
       }
+    } else if (msg.type === 'update_log') {
+      setUpdateLogs((l) => [...l, msg.data]);
     } else if (msg.type === 'auth_terminal_error') {
       toast.error(msg.error || 'Failed to start auth terminal');
       setAuthTermLoading(false);
@@ -335,6 +343,35 @@ export default function Settings() {
       toast.success('Saved');
       loadSettings();
     } catch (e) { toast.error(e.message); }
+  };
+
+  // ─── Version / update ───────────────────────────────────────────
+  const checkVersion = async () => {
+    setCheckingVersion(true);
+    try {
+      const d = await api.get('/api/system/version');
+      setVersionInfo(d);
+      if (d.hasUpdate) toast(`Update available: ${d.commitsBehind} commit(s) behind`);
+      else toast.success('ClawPanel is up to date');
+    } catch (e) { toast.error(e.message); }
+    finally { setCheckingVersion(false); }
+  };
+
+  const runUpdate = async () => {
+    if (!window.confirm('Update ClawPanel? The page will reload after the update completes.')) return;
+    setUpdating(true);
+    setUpdateLogs([]);
+    try {
+      await api.post('/api/system/update', {});
+      setUpdateLogs((l) => [...l, '\n✓ Update complete. Reloading in 10 seconds…\n']);
+      toast.success('Update complete — reloading…');
+      setTimeout(() => window.location.reload(), 10000);
+    } catch (e) {
+      setUpdateLogs((l) => [...l, `\n✗ ${e.message}\n`]);
+      toast.error('Update failed');
+    } finally {
+      setUpdating(false);
+    }
   };
 
   // ─── Status headline ────────────────────────────────────────────
@@ -774,16 +811,62 @@ export default function Settings() {
           )}
         </div>
 
-        {/* ═══ About ═══ */}
+        {/* ═══ ClawPanel Updates ═══ */}
         <div className="card">
-          <div className="card-title">About</div>
-          <div className="text-sm text-dim">
-            ClawPanel v{settings.version || '0.1.0'} · self-hosted VPS management<br />
-            Stack: Node.js + Express + SQLite + React + node-pty<br />
+          <div className="card-title">
+            <span>🦀 ClawPanel</span>
+            <span className="badge badge-orange" style={{ fontFamily: 'monospace' }}>v{versionInfo?.current || settings.version || '0.2.0'}</span>
+          </div>
+          <div className="text-sm text-dim" style={{ marginBottom: 14 }}>
+            Self-hosted VPS management with Claude Code AI ·{' '}
             <a href="https://github.com/otugalord/clawpanel" target="_blank" rel="noopener" style={{ color: 'var(--accent)' }}>
-              github.com/otugalord/clawpanel
+              GitHub
             </a>
           </div>
+          {versionInfo?.hasUpdate && (
+            <div style={{
+              padding: '10px 14px',
+              background: 'rgba(255,107,0,.08)',
+              border: '1px solid rgba(255,107,0,.22)',
+              borderRadius: 8,
+              marginBottom: 14,
+              fontSize: 12,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+            }}>
+              <span style={{ color: 'var(--accent)', fontWeight: 700 }}>⬆</span>
+              <span style={{ flex: 1 }}>
+                Update available — <strong>{versionInfo.commitsBehind} commit{versionInfo.commitsBehind !== 1 ? 's' : ''}</strong> behind
+              </span>
+              <button className="btn btn-sm" onClick={runUpdate} disabled={updating}>
+                {updating ? 'Updating…' : 'Update Now'}
+              </button>
+            </div>
+          )}
+          <div className="flex gap-8">
+            <button className="btn btn-sm btn-secondary" onClick={checkVersion} disabled={checkingVersion}>
+              <RefreshCw size={12} /> {checkingVersion ? 'Checking…' : 'Check for Updates'}
+            </button>
+          </div>
+          {updateLogs.length > 0 && (
+            <div style={{
+              background: '#0a0e14',
+              border: '1px solid var(--border)',
+              borderRadius: 8,
+              padding: 12,
+              marginTop: 14,
+              maxHeight: 250,
+              overflow: 'auto',
+              fontFamily: 'Menlo, monospace',
+              fontSize: 11,
+              lineHeight: 1.5,
+              color: '#c8d0dc',
+              whiteSpace: 'pre-wrap',
+            }}>
+              {updateLogs.join('')}
+            </div>
+          )}
         </div>
       </div>
     </div>

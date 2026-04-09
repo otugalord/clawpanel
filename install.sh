@@ -23,7 +23,7 @@ err() { echo -e "  $(red "✗") $1" >&2; }
 
 echo
 echo "  ╔═══════════════════════════════════════╗"
-echo "  ║        ClawPanel Installer v0.1.0        ║"
+echo "  ║        ClawPanel Installer v0.2.0        ║"
 echo "  ╚═══════════════════════════════════════╝"
 echo
 
