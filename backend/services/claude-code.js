@@ -328,63 +328,89 @@ function sendMessage(projectId, cwd, message) {
     } catch {}
   }
 
-  const isFirst = !s.hasFirstMessage;
   const willDrop = info.drop && fs.existsSync(path.join(info.home, '.claude', '.credentials.json'));
-  // --dangerously-skip-permissions allows claude to write/execute freely.
-  // Safe to use when running as the unprivileged clawpanel user (not root).
-  // When falling back to root, omit it (root is rejected by the CLI).
-  const args = ['--print'];
-  if (willDrop) {
-    args.push('--dangerously-skip-permissions');
-  }
-  if (isFirst) {
-    args.push('--session-id', s.sessionId);
-  } else {
-    args.push('--resume', s.sessionId);
-  }
-  args.push(message);
 
-  console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst} drop=${willDrop}`);
-  const spawnOpts = { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] };
-  if (willDrop) {
-    spawnOpts.uid = info.uid;
-    spawnOpts.gid = info.gid;
-  } else if (info.drop) {
-    console.warn('[claude-code] clawpanel creds missing, falling back to root (no --dangerously-skip-permissions)');
-    env.HOME = '/root';
-  }
-  const child = spawn('claude', args, spawnOpts);
-  s.current = child;
-  s.hasFirstMessage = true;
-
-  let stderrBuf = '';
-  child.stdout.on('data', (data) => {
-    const clean = stripAnsi(data.toString());
-    if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
-  });
-  child.stderr.on('data', (data) => {
-    const text = data.toString();
-    stderrBuf += text;
-    // Forward stderr too — the user can see errors live
-    const clean = stripAnsi(text);
-    if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
-  });
-  child.on('error', (err) => {
-    _emit(s, projectId, {
-      type: 'claude_output',
-      projectId,
-      data: `\n[ClawPanel] Failed to spawn claude: ${err.message}\n`,
-    });
-    _emit(s, projectId, { type: 'claude_done', projectId });
-    s.current = null;
-  });
-  child.on('exit', (code, signal) => {
-    s.current = null;
-    if (code !== 0 && code !== null) {
-      console.warn(`[claude-code] exit code=${code} stderr=${stderrBuf.slice(-200)}`);
+  // Inner spawn helper — called once normally, and again on retry if
+  // --resume fails with "No conversation found".
+  function doSpawn(isFirst, isRetry) {
+    const args = ['--print'];
+    if (willDrop) args.push('--dangerously-skip-permissions');
+    if (isFirst) {
+      args.push('--session-id', s.sessionId);
+    } else {
+      args.push('--resume', s.sessionId);
     }
-    _emit(s, projectId, { type: 'claude_done', projectId, exitCode: code });
-  });
+    args.push(message);
+
+    console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst} drop=${willDrop}${isRetry ? ' (RETRY)' : ''}`);
+    const spawnOpts = { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] };
+    if (willDrop) {
+      spawnOpts.uid = info.uid;
+      spawnOpts.gid = info.gid;
+    } else if (info.drop) {
+      console.warn('[claude-code] clawpanel creds missing, falling back to root');
+      env.HOME = '/root';
+    }
+    const child = spawn('claude', args, spawnOpts);
+    s.current = child;
+    s.hasFirstMessage = true;
+
+    let stderrBuf = '';
+    let retried = false;
+
+    child.stdout.on('data', (data) => {
+      const text = data.toString();
+      // Detect stale session → retry with a fresh session ID
+      if (!isRetry && !retried && text.includes('No conversation found')) {
+        retried = true;
+        console.warn(`[claude-code] session ${s.sessionId.slice(0,8)} not found — resetting and retrying`);
+        try { child.kill(); } catch {}
+        // Generate a new session ID and retry as first message
+        s.sessionId = uuidv4();
+        s.hasFirstMessage = false;
+        doSpawn(true, true);
+        return;
+      }
+      const clean = stripAnsi(text);
+      if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
+    });
+    child.stderr.on('data', (data) => {
+      const text = data.toString();
+      stderrBuf += text;
+      // Also check stderr for the stale-session error
+      if (!isRetry && !retried && text.includes('No conversation found')) {
+        retried = true;
+        console.warn(`[claude-code] session ${s.sessionId.slice(0,8)} not found (stderr) — resetting and retrying`);
+        try { child.kill(); } catch {}
+        s.sessionId = uuidv4();
+        s.hasFirstMessage = false;
+        doSpawn(true, true);
+        return;
+      }
+      const clean = stripAnsi(text);
+      if (clean) _emit(s, projectId, { type: 'claude_output', projectId, data: clean });
+    });
+    child.on('error', (err) => {
+      _emit(s, projectId, {
+        type: 'claude_output',
+        projectId,
+        data: `\n[ClawPanel] Failed to spawn claude: ${err.message}\n`,
+      });
+      _emit(s, projectId, { type: 'claude_done', projectId });
+      s.current = null;
+    });
+    child.on('exit', (code, signal) => {
+      if (retried) return; // The retry's child will handle the exit
+      s.current = null;
+      if (code !== 0 && code !== null) {
+        console.warn(`[claude-code] exit code=${code} stderr=${stderrBuf.slice(-200)}`);
+      }
+      _emit(s, projectId, { type: 'claude_done', projectId, exitCode: code });
+    });
+  }
+
+  // Initial call
+  doSpawn(!s.hasFirstMessage, false);
   return true;
 }
 
