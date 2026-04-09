@@ -1,19 +1,42 @@
 const express = require('express');
+const dns = require('dns').promises;
+const { execSync } = require('child_process');
 const { db } = require('../db/database');
 const nginxsvc = require('../services/nginx');
 const certbot = require('../services/certbot');
 
 const router = express.Router();
 
-// GET /api/domains
-router.get('/', (req, res) => {
+function getServerIp() {
+  try { return execSync("hostname -I", { encoding: 'utf8', timeout: 3000 }).split(' ')[0].trim(); }
+  catch { return '127.0.0.1'; }
+}
+
+async function checkDns(domain) {
+  const serverIp = getServerIp();
+  try {
+    const addrs = await dns.resolve4(domain);
+    const match = addrs.includes(serverIp);
+    return { ok: match, serverIp, resolved: addrs, match };
+  } catch (e) {
+    return { ok: false, serverIp, resolved: [], error: e.code || e.message };
+  }
+}
+
+// GET /api/domains — includes live DNS check
+router.get('/', async (req, res) => {
   const rows = db.prepare(`
     SELECT d.*, a.name as app_name, a.port as app_port
     FROM domains d
     LEFT JOIN apps a ON a.id = d.linked_app_id
     ORDER BY d.domain
   `).all();
-  res.json({ domains: rows });
+  // Parallel DNS checks
+  const results = await Promise.all(rows.map(async (r) => {
+    const dnsCheck = await checkDns(r.domain);
+    return { ...r, dns_ok: dnsCheck.ok, dns_resolved: dnsCheck.resolved, server_ip: dnsCheck.serverIp };
+  }));
+  res.json({ domains: results });
 });
 
 // POST /api/domains
@@ -35,14 +58,14 @@ router.post('/:id/link', (req, res) => {
   if (!row) return res.status(404).json({ error: 'Not found' });
   const { app_id } = req.body || {};
   const app = app_id ? db.prepare('SELECT * FROM apps WHERE id=?').get(app_id) : null;
-  if (!app) return res.status(400).json({ error: 'App inválida' });
-  if (!app.port) return res.status(400).json({ error: 'App não tem porta definida' });
+  if (!app) return res.status(400).json({ error: 'Invalid app' });
+  if (!app.port) return res.status(400).json({ error: 'App has no port defined' });
   try {
     nginxsvc.writeConfig(row.domain, app.port);
     const test = nginxsvc.testConfig();
     if (!test.ok) {
       nginxsvc.removeConfig(row.domain);
-      return res.status(500).json({ error: 'nginx test falhou: ' + test.error });
+      return res.status(500).json({ error: 'nginx test failed: ' + test.error });
     }
     nginxsvc.reload();
     db.prepare('UPDATE domains SET linked_app_id=? WHERE id=?').run(app.id, row.id);
@@ -75,10 +98,27 @@ router.delete('/:id', (req, res) => {
   res.json({ ok: true });
 });
 
-// POST /api/domains/:id/ssl — installs SSL (streams log via WS broadcast)
+// GET /api/domains/:id/dns — check DNS for a specific domain
+router.get('/:id/dns', async (req, res) => {
+  const row = db.prepare('SELECT * FROM domains WHERE id=?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  res.json(await checkDns(row.domain));
+});
+
+// POST /api/domains/:id/ssl — installs SSL with DNS pre-flight check
 router.post('/:id/ssl', async (req, res) => {
   const row = db.prepare('SELECT * FROM domains WHERE id=?').get(req.params.id);
   if (!row) return res.status(404).json({ error: 'Not found' });
+
+  // DNS pre-flight
+  const dnsCheck = await checkDns(row.domain);
+  if (!dnsCheck.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: `DNS not pointing to this server. Your domain resolves to [${dnsCheck.resolved.join(', ') || 'nothing'}] but this server is ${dnsCheck.serverIp}. Update your A record at your registrar and wait for propagation (up to 48h).`,
+    });
+  }
+
   const { email } = req.body || {};
   const logs = [];
   const ok = await certbot.installSSL(row.domain, email, (chunk) => {

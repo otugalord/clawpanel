@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
-import { Plus, Link2, Link2Off, Shield, ShieldOff, Trash2, X } from 'lucide-react';
+import { useEffect, useState, useCallback } from 'react';
+import { Plus, Link2, Link2Off, Shield, ShieldOff, Trash2, X, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { api } from '../lib/api';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 export default function DomainManager() {
   const [domains, setDomains] = useState([]);
@@ -10,6 +11,17 @@ export default function DomainManager() {
   const [showAdd, setShowAdd] = useState(false);
   const [newDomain, setNewDomain] = useState('');
   const [linkModal, setLinkModal] = useState(null);
+
+  // SSL log modal
+  const [sslModal, setSslModal] = useState(null); // { domain, logs: [], done, ok }
+
+  const onWsMessage = useCallback((msg) => {
+    if (msg.type === 'ssl_log' && sslModal && msg.domain === sslModal.domain) {
+      setSslModal((prev) => prev ? { ...prev, logs: [...prev.logs, msg.data] } : prev);
+    }
+  }, [sslModal?.domain]);
+
+  const { connected } = useWebSocket(onWsMessage);
 
   const load = async () => {
     try {
@@ -23,8 +35,14 @@ export default function DomainManager() {
   useEffect(() => { load(); }, []);
 
   const add = async () => {
+    const val = newDomain.trim().toLowerCase();
+    if (!val) return;
+    if (!/^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$/.test(val)) {
+      toast.error('Invalid domain format');
+      return;
+    }
     try {
-      await api.post('/api/domains', { domain: newDomain.trim() });
+      await api.post('/api/domains', { domain: val });
       toast.success('Domain added');
       setNewDomain('');
       setShowAdd(false);
@@ -36,7 +54,7 @@ export default function DomainManager() {
     if (!linkModal) return;
     try {
       await api.post(`/api/domains/${linkModal.id}/link`, { app_id: appId });
-      toast.success('Linked + nginx reload');
+      toast.success('Linked — nginx configured');
       setLinkModal(null);
       load();
     } catch (e) { toast.error(e.message); }
@@ -54,15 +72,27 @@ export default function DomainManager() {
   const installSSL = async (d) => {
     const email = window.prompt(`Email for Let's Encrypt (for ${d.domain}):`, `admin@${d.domain}`);
     if (!email) return;
-    toast.loading('Installing SSL...', { id: 'ssl' });
+    // Open the log modal
+    setSslModal({ domain: d.domain, logs: ['Starting SSL installation...\n'], done: false, ok: null });
     try {
       const res = await api.post(`/api/domains/${d.id}/ssl`, { email });
-      toast.dismiss('ssl');
-      if (res.ok) toast.success('SSL installed'); else toast.error('SSL failed — check logs');
+      setSslModal((prev) => prev ? {
+        ...prev,
+        done: true,
+        ok: res.ok,
+        logs: [...prev.logs, res.ok ? '\n✓ SSL installed successfully!\n' : `\n✗ SSL installation failed.\n${res.log || ''}\n`],
+      } : prev);
+      if (res.ok) toast.success('SSL installed');
       load();
     } catch (e) {
-      toast.dismiss('ssl');
-      toast.error(e.message);
+      const errMsg = e.data?.error || e.message;
+      setSslModal((prev) => prev ? {
+        ...prev,
+        done: true,
+        ok: false,
+        logs: [...prev.logs, `\n✗ Error: ${errMsg}\n`],
+      } : prev);
+      toast.error(errMsg);
     }
   };
 
@@ -76,7 +106,7 @@ export default function DomainManager() {
   };
 
   const del = async (d) => {
-    if (!window.confirm(`Delete ${d.domain} from the database?`)) return;
+    if (!window.confirm(`Delete ${d.domain}?`)) return;
     try {
       await api.del(`/api/domains/${d.id}`);
       toast.success('Deleted');
@@ -89,10 +119,11 @@ export default function DomainManager() {
       <div className="page-header">
         <div>
           <h1>Domains</h1>
-          <p>{domains.length} domains · nginx + certbot</p>
+          <p>{domains.length} domain{domains.length !== 1 ? 's' : ''} · Link to apps, install SSL</p>
         </div>
         <div className="page-header-actions">
-          <button className="btn" onClick={() => setShowAdd(true)}><Plus size={14} /> Add</button>
+          <button className="btn btn-sm btn-ghost" onClick={load}><RefreshCw size={13} /></button>
+          <button className="btn" onClick={() => setShowAdd(true)}><Plus size={14} /> Add Domain</button>
         </div>
       </div>
 
@@ -101,7 +132,7 @@ export default function DomainManager() {
       ) : domains.length === 0 ? (
         <div className="card empty">
           <div className="emoji">🌐</div>
-          <div>No domains yet. Add one to get started.</div>
+          <div>No domains yet. Point your domain's A record to this server, then add it here.</div>
         </div>
       ) : (
         <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
@@ -110,8 +141,8 @@ export default function DomainManager() {
               <tr>
                 <th>Domain</th>
                 <th>App</th>
+                <th>DNS</th>
                 <th>SSL</th>
-                <th>Added</th>
                 <th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
@@ -127,13 +158,23 @@ export default function DomainManager() {
                     )}
                   </td>
                   <td>
+                    {d.dns_ok ? (
+                      <span className="badge badge-green" title={`Resolves to ${d.dns_resolved?.join(', ')}`}>
+                        <CheckCircle2 size={10} /> Pointed here
+                      </span>
+                    ) : (
+                      <span className="badge badge-red" title={`Resolves to ${d.dns_resolved?.join(', ') || 'nothing'}. Server is ${d.server_ip}`}>
+                        <XCircle size={10} /> Not pointed
+                      </span>
+                    )}
+                  </td>
+                  <td>
                     {d.ssl_enabled ? (
                       <span className="badge badge-green">● HTTPS</span>
                     ) : (
                       <span className="badge badge-gray">HTTP</span>
                     )}
                   </td>
-                  <td className="text-xs text-dim">{new Date(d.added_at).toLocaleDateString('en-GB')}</td>
                   <td style={{ textAlign: 'right' }}>
                     <div className="flex gap-8" style={{ justifyContent: 'flex-end' }}>
                       {d.linked_app_id ? (
@@ -150,7 +191,7 @@ export default function DomainManager() {
                           <ShieldOff size={13} />
                         </button>
                       ) : (
-                        <button className="btn btn-sm btn-secondary" title="Install SSL" onClick={() => installSSL(d)}>
+                        <button className="btn btn-sm btn-secondary" title="Install SSL" onClick={() => installSSL(d)} disabled={!d.dns_ok}>
                           <Shield size={13} />
                         </button>
                       )}
@@ -166,17 +207,24 @@ export default function DomainManager() {
         </div>
       )}
 
-      {/* Add modal */}
+      {/* Add domain modal */}
       <div className={'modal-bg' + (showAdd ? ' show' : '')} onClick={(e) => e.target === e.currentTarget && setShowAdd(false)}>
         <div className="modal">
           <div className="flex-between">
-            <h2>Add domain</h2>
+            <h2>Add Domain</h2>
             <button className="btn btn-ghost btn-sm" onClick={() => setShowAdd(false)}><X size={14} /></button>
           </div>
-          <p className="sub">DNS must already point to this server before installing SSL.</p>
+          <p className="sub">Make sure the domain's A record already points to this server before adding.</p>
           <div className="field">
             <label className="label">Domain</label>
-            <input className="input" value={newDomain} onChange={(e) => setNewDomain(e.target.value)} placeholder="mysite.com" autoFocus />
+            <input
+              className="input"
+              value={newDomain}
+              onChange={(e) => setNewDomain(e.target.value)}
+              placeholder="mysite.com"
+              autoFocus
+              onKeyDown={(e) => e.key === 'Enter' && add()}
+            />
           </div>
           <div className="modal-footer">
             <button className="btn btn-secondary" onClick={() => setShowAdd(false)}>Cancel</button>
@@ -185,11 +233,11 @@ export default function DomainManager() {
         </div>
       </div>
 
-      {/* Link modal */}
+      {/* Link to app modal */}
       <div className={'modal-bg' + (linkModal ? ' show' : '')} onClick={(e) => e.target === e.currentTarget && setLinkModal(null)}>
         <div className="modal">
           <div className="flex-between">
-            <h2>Link {linkModal?.domain} to an app</h2>
+            <h2>Link {linkModal?.domain}</h2>
             <button className="btn btn-ghost btn-sm" onClick={() => setLinkModal(null)}><X size={14} /></button>
           </div>
           <p className="sub">nginx config is generated automatically.</p>
@@ -209,6 +257,48 @@ export default function DomainManager() {
               <div className="empty">No apps with a port defined</div>
             )}
           </div>
+        </div>
+      </div>
+
+      {/* SSL log modal */}
+      <div className={'modal-bg' + (sslModal ? ' show' : '')} onClick={(e) => e.target === e.currentTarget && sslModal?.done && setSslModal(null)}>
+        <div className="modal" style={{ maxWidth: 600 }}>
+          <div className="flex-between">
+            <h2>SSL Installation — {sslModal?.domain}</h2>
+            {sslModal?.done && (
+              <button className="btn btn-ghost btn-sm" onClick={() => setSslModal(null)}><X size={14} /></button>
+            )}
+          </div>
+          <div style={{
+            background: '#0a0e14',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            padding: 14,
+            maxHeight: 350,
+            overflow: 'auto',
+            fontFamily: 'Menlo, Monaco, monospace',
+            fontSize: 11,
+            lineHeight: 1.6,
+            color: '#c8d0dc',
+            whiteSpace: 'pre-wrap',
+            marginTop: 14,
+          }}>
+            {sslModal?.logs.map((l, i) => {
+              const isErr = l.includes('✗') || l.toLowerCase().includes('error') || l.toLowerCase().includes('fail');
+              const isOk = l.includes('✓') || l.toLowerCase().includes('success');
+              return (
+                <span key={i} style={{ color: isErr ? 'var(--red)' : isOk ? 'var(--green)' : 'inherit' }}>
+                  {l}
+                </span>
+              );
+            })}
+            {!sslModal?.done && <span className="spinner" style={{ display: 'inline-block', width: 14, height: 14, verticalAlign: 'middle', marginLeft: 4 }} />}
+          </div>
+          {sslModal?.done && (
+            <div className="modal-footer">
+              <button className="btn" onClick={() => setSslModal(null)}>Close</button>
+            </div>
+          )}
         </div>
       </div>
     </div>
