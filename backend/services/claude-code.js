@@ -311,25 +311,32 @@ function sendMessage(projectId, cwd, message) {
   const env = buildEnv();
   const info = getClawpanelUser();
   trustProjectFolder(cwd, env.HOME);
-  // Also make sure the clawpanel user can read the project folder
+  // Make the project folder fully writable by the clawpanel user so claude
+  // can create/edit files without permission errors.
   if (info.drop) {
     try {
-      const st = fs.statSync(cwd);
-      if (st.uid !== info.uid || st.gid !== info.gid) {
-        // chmod to allow read/execute by the clawpanel user so it can cd into it
-        fs.chmodSync(cwd, 0o755);
-      }
+      // Recursive chown so the clawpanel user owns everything in the project
+      const chownRec = (p) => {
+        try {
+          fs.chownSync(p, info.uid, info.gid);
+          if (fs.statSync(p).isDirectory()) {
+            for (const e of fs.readdirSync(p)) chownRec(path.join(p, e));
+          }
+        } catch {}
+      };
+      chownRec(cwd);
     } catch {}
   }
 
   const isFirst = !s.hasFirstMessage;
-  // Use --session-id for the first message, --resume for subsequent ones.
-  // IMPORTANT: claude --print mode does NOT require
-  // --dangerously-skip-permissions — permission prompts don't apply to
-  // the non-interactive print flow. That flag is only rejected when
-  // running as root interactively. Keeping the invocation minimal makes
-  // it work reliably whether we drop privileges or not.
+  const willDrop = info.drop && fs.existsSync(path.join(info.home, '.claude', '.credentials.json'));
+  // --dangerously-skip-permissions allows claude to write/execute freely.
+  // Safe to use when running as the unprivileged clawpanel user (not root).
+  // When falling back to root, omit it (root is rejected by the CLI).
   const args = ['--print'];
+  if (willDrop) {
+    args.push('--dangerously-skip-permissions');
+  }
   if (isFirst) {
     args.push('--session-id', s.sessionId);
   } else {
@@ -337,20 +344,14 @@ function sendMessage(projectId, cwd, message) {
   }
   args.push(message);
 
-  console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst} drop=${info.drop}`);
+  console.log(`[claude-code] spawn project=${projectId} session=${s.sessionId.slice(0,8)} first=${isFirst} drop=${willDrop}`);
   const spawnOpts = { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] };
-  // Drop privileges if possible AND the clawpanel home has credentials.
-  // Otherwise stay as root — --print mode works either way.
-  if (info.drop) {
-    const clawpanelCred = path.join(info.home, '.claude', '.credentials.json');
-    if (fs.existsSync(clawpanelCred)) {
-      spawnOpts.uid = info.uid;
-      spawnOpts.gid = info.gid;
-    } else {
-      console.warn('[claude-code] clawpanel creds missing, falling back to root');
-      // Re-point HOME at root since we're no longer dropping
-      env.HOME = '/root';
-    }
+  if (willDrop) {
+    spawnOpts.uid = info.uid;
+    spawnOpts.gid = info.gid;
+  } else if (info.drop) {
+    console.warn('[claude-code] clawpanel creds missing, falling back to root (no --dangerously-skip-permissions)');
+    env.HOME = '/root';
   }
   const child = spawn('claude', args, spawnOpts);
   s.current = child;
