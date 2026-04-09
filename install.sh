@@ -29,26 +29,26 @@ echo
 
 # ─── root check ─────────────────────────────────────
 if [[ $EUID -ne 0 ]]; then
-  err "Este instalador tem de ser executado como root (sudo bash install.sh)"
+  err "This installer must be run as root (sudo bash install.sh)"
   exit 1
 fi
 
 # ─── OS check ───────────────────────────────────────
 if ! grep -qiE 'ubuntu|debian' /etc/os-release 2>/dev/null; then
-  warn "Só testado em Ubuntu 20.04+ / Debian 11+. A continuar mesmo assim…"
+  warn "Only tested on Ubuntu 20.04+ / Debian 11+. Continuing anyway…"
 fi
 
 export DEBIAN_FRONTEND=noninteractive
 
 # ─── base packages ──────────────────────────────────
-info "A actualizar apt e a instalar dependências base…"
+info "Updating apt and installing base dependencies…"
 apt-get update -qq
 apt-get install -y -qq curl git build-essential python3 ca-certificates gnupg >/dev/null
 ok "base: curl git build-essential python3"
 
 # ─── Node.js 20 ─────────────────────────────────────
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -v 2>/dev/null | grep -oE 'v[0-9]+' | tr -d v)" -lt 20 ]]; then
-  info "A instalar Node.js 20 (via NodeSource)…"
+  info "Installing Node.js 20 (via NodeSource)…"
   curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null 2>&1
   apt-get install -y -qq nodejs >/dev/null
 fi
@@ -56,34 +56,74 @@ ok "node $(node -v)  npm $(npm -v)"
 
 # ─── PM2 ────────────────────────────────────────────
 if ! command -v pm2 >/dev/null 2>&1; then
-  info "A instalar PM2 global…"
+  info "Installing PM2 globally…"
   npm install -g pm2 >/dev/null 2>&1
 fi
 ok "pm2 $(pm2 -v)"
 
 # ─── Claude Code CLI ────────────────────────────────
 if ! command -v claude >/dev/null 2>&1; then
-  info "A instalar Claude Code CLI (@anthropic-ai/claude-code)…"
+  info "Installing Claude Code CLI (@anthropic-ai/claude-code)…"
   npm install -g @anthropic-ai/claude-code 2>&1 | tail -3 || {
-    warn "Falha a instalar claude CLI — podes instalar manualmente depois: npm i -g @anthropic-ai/claude-code"
+    warn "Failed to install claude CLI — you can install manually later: npm i -g @anthropic-ai/claude-code"
   }
 fi
 if command -v claude >/dev/null 2>&1; then
   ok "claude $(claude --version 2>&1 | head -1)"
 else
-  warn "claude CLI não detectado no PATH"
+  warn "claude CLI not detected on PATH"
 fi
+
+# ─── clawpanel system user ──────────────────────────
+# Claude Code refuses --dangerously-skip-permissions when run as root,
+# so we create a dedicated unprivileged user that the backend drops
+# privileges to whenever it spawns claude.
+if ! id "clawpanel" >/dev/null 2>&1; then
+  info "Creating 'clawpanel' system user…"
+  useradd -m -s /bin/bash clawpanel
+  ok "user 'clawpanel' created (uid=$(id -u clawpanel))"
+else
+  ok "user 'clawpanel' already exists (uid=$(id -u clawpanel))"
+fi
+
+# Ensure the user has a passwordless sudoers entry (only used for apt/apt-get
+# operations during app setup — tighten this in production if desired)
+if [[ ! -f /etc/sudoers.d/clawpanel ]]; then
+  echo "clawpanel ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/clawpanel
+  chmod 440 /etc/sudoers.d/clawpanel
+  ok "sudoers.d entry added for clawpanel"
+fi
+
+# Mirror root's claude credentials to the clawpanel user so it can run
+# claude without re-authenticating.
+mkdir -p /home/clawpanel/.claude
+if [[ -f /root/.claude/.credentials.json ]]; then
+  cp /root/.claude/.credentials.json /home/clawpanel/.claude/.credentials.json
+  ok "credentials copied to /home/clawpanel/.claude/"
+fi
+if [[ -f /root/.claude.json ]]; then
+  cp /root/.claude.json /home/clawpanel/.claude.json
+  ok "trust config copied to /home/clawpanel/.claude.json"
+fi
+chown -R clawpanel:clawpanel /home/clawpanel/.claude /home/clawpanel/.claude.json 2>/dev/null || true
+chmod 700 /home/clawpanel/.claude 2>/dev/null || true
+chmod 600 /home/clawpanel/.claude/.credentials.json 2>/dev/null || true
+
+# Apps directory must be readable by the clawpanel user
+mkdir -p /root/apps
+chmod 755 /root 2>/dev/null || true
+chmod -R 755 /root/apps 2>/dev/null || true
 
 # ─── nginx ──────────────────────────────────────────
 if ! command -v nginx >/dev/null 2>&1; then
-  info "A instalar nginx…"
+  info "Installing nginx…"
   apt-get install -y -qq nginx >/dev/null
 fi
 ok "nginx $(nginx -v 2>&1 | awk -F/ '{print $2}')"
 
 # ─── certbot ────────────────────────────────────────
 if ! command -v certbot >/dev/null 2>&1; then
-  info "A instalar certbot…"
+  info "Installing certbot…"
   apt-get install -y -qq certbot python3-certbot-nginx >/dev/null
 fi
 ok "certbot $(certbot --version 2>&1 | awk '{print $2}')"
@@ -93,34 +133,35 @@ apt-get install -y -qq sqlite3 libsqlite3-dev >/dev/null || true
 
 # ─── clone or update ────────────────────────────────
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  info "A actualizar repositório em $INSTALL_DIR…"
-  git -C "$INSTALL_DIR" pull --ff-only >/dev/null 2>&1 || warn "git pull falhou — a usar versão local"
+  info "Updating repository at $INSTALL_DIR…"
+  git -C "$INSTALL_DIR" pull --ff-only >/dev/null 2>&1 || warn "git pull failed — using local version"
 elif [[ -d "$INSTALL_DIR" && -f "$INSTALL_DIR/backend/package.json" ]]; then
-  info "Instalação existente sem .git em $INSTALL_DIR — a reutilizar"
+  info "Existing install without .git at $INSTALL_DIR — reusing"
 else
-  info "A clonar ClawPanel para $INSTALL_DIR…"
+  info "Cloning ClawPanel into $INSTALL_DIR…"
   git clone --depth=1 "$REPO_URL" "$INSTALL_DIR" 2>&1 | tail -3 || {
-    err "Falhou git clone. Define CLAWPANEL_REPO ou copia manualmente para $INSTALL_DIR"
+    err "git clone failed. Set CLAWPANEL_REPO or copy manually to $INSTALL_DIR"
     exit 1
   }
 fi
-ok "código em $INSTALL_DIR"
+ok "source code at $INSTALL_DIR"
 
 # ─── npm install (backend) ──────────────────────────
-info "A instalar dependências backend (pode demorar)…"
+info "Installing backend dependencies (this can take a while)…"
 cd "$INSTALL_DIR/backend"
 npm install --omit=dev --no-audit --no-fund 2>&1 | tail -3
-ok "backend deps instaladas"
+ok "backend deps installed"
 
 # ─── npm install + build (frontend) ─────────────────
-info "A instalar e buildar frontend…"
+info "Installing and building frontend…"
 cd "$INSTALL_DIR/frontend"
 npm install --no-audit --no-fund 2>&1 | tail -3
 npm run build 2>&1 | tail -3
-ok "frontend buildado em $INSTALL_DIR/frontend/dist"
+ok "frontend built at $INSTALL_DIR/frontend/dist"
 
 # ─── apps dir ───────────────────────────────────────
 mkdir -p /root/apps
+chmod 755 /root/apps
 ok "apps directory: /root/apps"
 
 # ─── env file (JWT secret) ──────────────────────────
@@ -132,13 +173,13 @@ PORT=$PORT
 HOST=0.0.0.0
 JWT_SECRET=$JWT_SECRET
 EOF
-  ok "criado .env com JWT_SECRET aleatório"
+  ok "created .env with random JWT_SECRET"
 else
-  ok ".env já existe (mantido)"
+  ok ".env already exists (kept)"
 fi
 
 # ─── start with PM2 ─────────────────────────────────
-info "A (re)iniciar serviço ClawPanel com PM2…"
+info "Starting ClawPanel service under PM2…"
 cd "$INSTALL_DIR/backend"
 if pm2 describe "$SERVICE_NAME" >/dev/null 2>&1; then
   pm2 restart "$SERVICE_NAME" --update-env >/dev/null
@@ -150,7 +191,7 @@ pm2 save --force >/dev/null 2>&1 || true
 # pm2 startup (idempotent)
 pm2 startup systemd -u root --hp /root 2>&1 | grep -Eo 'sudo.*' | bash 2>/dev/null || true
 
-ok "pm2 service '$SERVICE_NAME' a correr"
+ok "pm2 service '$SERVICE_NAME' running"
 
 # ─── nginx reverse proxy (port 80 → $PORT) ─────────
 NGINX_CONF="/etc/nginx/sites-available/clawpanel.conf"
@@ -161,10 +202,10 @@ if command -v ss >/dev/null 2>&1; then
   PORT80_HOLDER=$(ss -ltnp 2>/dev/null | awk '$4 ~ /:80$/ {print $NF}' | head -1)
 fi
 if [[ -n "$PORT80_HOLDER" && "$PORT80_HOLDER" != *"nginx"* ]]; then
-  warn "porta 80 já está em uso por: $PORT80_HOLDER (nginx não irá servir em 80)"
+  warn "port 80 already in use by: $PORT80_HOLDER (nginx will not serve on 80)"
 fi
 
-info "A (re)criar config nginx (porta 80 → $PORT)…"
+info "Writing nginx config (port 80 → $PORT)…"
 cat > "$NGINX_CONF" <<EOF
 server {
     listen 80 default_server;
@@ -200,21 +241,21 @@ rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 if nginx -t 2>&1 | grep -q "successful"; then
   systemctl enable nginx >/dev/null 2>&1 || true
   if systemctl is-active --quiet nginx; then
-    systemctl reload nginx && ok "nginx recarregado"
+    systemctl reload nginx && ok "nginx reloaded"
   else
-    systemctl start nginx && ok "nginx iniciado"
+    systemctl start nginx && ok "nginx started"
   fi
 else
-  warn "nginx -t falhou — ver: nginx -t"
+  warn "nginx -t failed — run: nginx -t"
   nginx -t 2>&1 | head -5 | sed 's/^/    /'
 fi
 
 # ─── firewall (ufw) ─────────────────────────────────
 if command -v ufw >/dev/null 2>&1; then
   if ufw status 2>/dev/null | grep -q "Status: active"; then
-    ufw allow 80/tcp >/dev/null 2>&1 && ok "ufw: porta 80/tcp permitida"
+    ufw allow 80/tcp >/dev/null 2>&1 && ok "ufw: port 80/tcp allowed"
     ufw allow 443/tcp >/dev/null 2>&1 || true
-    ufw allow "$PORT"/tcp >/dev/null 2>&1 && ok "ufw: porta $PORT/tcp permitida"
+    ufw allow "$PORT"/tcp >/dev/null 2>&1 && ok "ufw: port $PORT/tcp allowed"
   fi
 fi
 
@@ -223,7 +264,7 @@ sleep 2
 if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then
   ok "health check OK"
 else
-  warn "health check falhou — ver: pm2 logs clawpanel"
+  warn "health check failed — run: pm2 logs clawpanel"
 fi
 
 # ─── done ───────────────────────────────────────────
@@ -231,19 +272,19 @@ IP=$(curl -fsS4 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
 echo
 echo "  ╔═══════════════════════════════════════════╗"
-echo "  ║  $(green '✓ ClawPanel instalado com sucesso!')         ║"
+echo "  ║  $(green '✓ ClawPanel installed successfully!')          ║"
 echo "  ╚═══════════════════════════════════════════╝"
 echo
-echo "  $(bold 'Aceder:')       http://${IP}"
-echo "  $(bold 'Porta direta:') http://${IP}:${PORT}"
+echo "  $(bold 'Access:')       http://${IP}"
+echo "  $(bold 'Direct port:')  http://${IP}:${PORT}"
 echo "  $(bold 'Logs:')         pm2 logs clawpanel"
 echo "  $(bold 'Restart:')      pm2 restart clawpanel"
 echo
-echo "  $(bold '1.') Primeira visita → cria o utilizador administrador."
+echo "  $(bold '1.') First visit → create your admin user."
 echo
-echo "  $(bold '2.') $(yellow 'IMPORTANTE — Autenticar o Claude Code CLI:')"
-echo "     Corre $(bold 'claude') uma vez no terminal (ou no Terminal tab do ClawPanel)."
-echo "     Ele vai abrir um fluxo OAuth no browser para te autenticares."
-echo "     Sem isto, o chat Claude Code do ClawPanel não funciona."
+echo "  $(bold '2.') $(yellow 'IMPORTANT — Authenticate Claude Code:')"
+echo "     Open ClawPanel → Settings → Sign in with Anthropic,"
+echo "     or run $(bold 'claude setup-token') on the server."
+echo "     Without this the Claude Code chat won't work."
 echo
 

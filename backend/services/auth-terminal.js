@@ -111,6 +111,15 @@ class AuthTerminalManager extends EventEmitter {
       ) {
         session.completed = true;
         console.log('[auth-terminal] ✓ success detected from claude output');
+        // Mirror the fresh credentials to the clawpanel system user's home
+        // so the chat spawn path (running as clawpanel, not root) picks
+        // them up immediately.
+        try {
+          const { syncCredentialsToClawpanelUser } = require('./claude-code');
+          setTimeout(() => {
+            try { syncCredentialsToClawpanelUser(); } catch {}
+          }, 500);
+        } catch {}
         try {
           this.emit('auth_code_submitted', { sessionId: id, reason: 'success_detected' });
         } catch {}
