@@ -34,6 +34,8 @@ export function HelpButton() {
   const [open, setOpen] = useState(false);
   const location = useLocation();
   const tips = TIPS[location.pathname] || TIPS['/'];
+  // Push the button up on the Claude chat page so it doesn't overlap the input
+  const isChatPage = location.pathname === '/claude';
 
   return (
     <>
@@ -41,7 +43,7 @@ export function HelpButton() {
         onClick={() => setOpen(true)}
         style={{
           position: 'fixed',
-          bottom: 20,
+          bottom: isChatPage ? 80 : 20,
           right: 20,
           width: 44,
           height: 44,

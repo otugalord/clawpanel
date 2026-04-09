@@ -58,18 +58,26 @@ router.get('/', async (req, res) => {
     let procs = [];
     try { procs = await pm2svc.list(); } catch {}
     const procMap = new Map(procs.map((p) => [p.name, p]));
+    // Sync DB status with real PM2 state
+    const updateStatus = db.prepare('UPDATE apps SET status=? WHERE id=?');
     const out = apps.map((a) => {
       const p = procMap.get(a.name);
+      const realStatus = p?.pm2_env?.status || 'stopped';
+      // Keep DB in sync with PM2 reality
+      if (a.status !== realStatus) {
+        try { updateStatus.run(realStatus, a.id); } catch {}
+      }
       return {
         ...a,
+        status: realStatus,
         env_vars: JSON.parse(a.env_vars || '{}'),
         live: p
           ? {
-              status: p.pm2_env?.status,
-              cpu: p.monit?.cpu,
-              memory: p.monit?.memory,
+              status: realStatus,
+              cpu: p.monit?.cpu || 0,
+              memory: p.monit?.memory || 0,
               uptime: p.pm2_env?.pm_uptime ? Date.now() - p.pm2_env.pm_uptime : 0,
-              restarts: p.pm2_env?.restart_time,
+              restarts: p.pm2_env?.restart_time || 0,
               pid: p.pid,
             }
           : null,
