@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { HelpCircle, X, Lightbulb, Rocket } from 'lucide-react';
+import { HelpCircle, X, Lightbulb } from 'lucide-react';
 
 const TIPS = {
   '/': [

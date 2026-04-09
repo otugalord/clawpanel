@@ -14,6 +14,7 @@ import { api } from './lib/api';
 export default function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('cp_welcomed'));
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -46,8 +47,6 @@ export default function App() {
       </Routes>
     );
   }
-
-  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem('cp_welcomed'));
 
   return (
     <div className="app">
